@@ -15,6 +15,10 @@ export interface Config {
   rateLimitPerMinute: number;
 }
 
+export function botIds(config: Pick<Config, "bots">): string[] {
+  return [...new Set(config.bots.map((b) => b.id))];
+}
+
 export const BOT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -28,13 +32,15 @@ export function parseHash(value: string, label: string): Buffer {
   return Buffer.from(hex, "hex");
 }
 
-/** Parses `BOTS="chief-of-staff:<sha256>,abjets-company:<sha256>"`. */
+/**
+ * Parses `BOTS="chief-of-staff:<sha256>,abjets-company:<sha256>"`. An id may
+ * appear more than once (with different hashes) to rotate its token without downtime.
+ */
 export function parseBots(value: string | undefined): BotEntry[] {
   if (!value || !value.trim()) {
     throw new ConfigError("BOTS is required (format: id:sha256hex,id:sha256hex)");
   }
   const bots: BotEntry[] = [];
-  const seenIds = new Set<string>();
   const seenHashes = new Set<string>();
   for (const raw of value.split(",")) {
     const entry = raw.trim();
@@ -46,11 +52,9 @@ export function parseBots(value: string | undefined): BotEntry[] {
       throw new ConfigError(`BOTS id "${id}" must match ${BOT_ID_PATTERN}`);
     }
     const tokenHash = parseHash(entry.slice(sep + 1), `BOTS hash for "${id}"`);
-    if (seenIds.has(id)) throw new ConfigError(`BOTS id "${id}" is listed twice`);
     if (seenHashes.has(tokenHash.toString("hex"))) {
-      throw new ConfigError(`BOTS hash for "${id}" duplicates another bot's hash`);
+      throw new ConfigError(`BOTS hash for "${id}" duplicates another entry's hash`);
     }
-    seenIds.add(id);
     seenHashes.add(tokenHash.toString("hex"));
     bots.push({ id, tokenHash });
   }

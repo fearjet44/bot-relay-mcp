@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { authenticateBot, extractBotToken, extractViewerToken, sha256, tokenMatchesHash } from "../src/auth.ts";
-import { ConfigError, loadConfig, parseBots } from "../src/config.ts";
+import { botIds, ConfigError, loadConfig, parseBots } from "../src/config.ts";
 import { TOKENS, testEnv } from "./helpers.ts";
 
 describe("config", () => {
@@ -24,8 +24,18 @@ describe("config", () => {
     assert.throws(() => parseBots("chief-of-staff"), ConfigError);
     assert.throws(() => parseBots("chief-of-staff:nothex"), ConfigError);
     assert.throws(() => parseBots(`Bad_Id:${h}`), ConfigError);
-    assert.throws(() => parseBots(`a:${h},a:${sha256("y").toString("hex")}`), ConfigError);
     assert.throws(() => parseBots(`a:${h},b:${h}`), ConfigError);
+  });
+
+  it("allows two hashes for one bot id so tokens can be rotated without downtime", () => {
+    const oldToken = "relay_old";
+    const newToken = "relay_new";
+    const config = loadConfig({
+      BOTS: `a:${sha256(oldToken).toString("hex")},a:${sha256(newToken).toString("hex")},b:${sha256("b").toString("hex")}`,
+    });
+    assert.deepEqual(botIds(config), ["a", "b"]);
+    assert.equal(authenticateBot(config.bots, oldToken), "a");
+    assert.equal(authenticateBot(config.bots, newToken), "a");
   });
 
   it("does not accept a plaintext viewer token in place of its hash", () => {

@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.ts";
 import { sha256 } from "../src/auth.ts";
-import { loadConfig, type Config } from "../src/config.ts";
+import { botIds, loadConfig, type Config } from "../src/config.ts";
 import { openDatabase } from "../src/db.ts";
 import { RateLimiter } from "../src/ratelimit.ts";
 import { RelayStore } from "../src/store.ts";
@@ -44,7 +44,7 @@ export function makeHarness(envOverrides: Record<string, string> = {}): Harness 
   const dir = mkdtempSync(join(tmpdir(), "bot-relay-test-"));
   const config = loadConfig(testEnv({ DB_PATH: join(dir, "relay.db"), ...envOverrides }));
   const db = openDatabase(config.dbPath);
-  const store = new RelayStore(db, config.bots.map((b) => b.id), config);
+  const store = new RelayStore(db, botIds(config), config);
   return {
     dir,
     config,

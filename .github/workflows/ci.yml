@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image with Podman
+        run: podman build -t localhost/bot-relay-mcp:ci .
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          hash=$(printf 'ci-token' | sha256sum | cut -d' ' -f1)
+          podman run -d --name relay --read-only --tmpfs /tmp --cap-drop ALL \
+            -e BOTS="ci-bot:${hash},other-bot:$(printf 'other' | sha256sum | cut -d' ' -f1)" \
+            -e DB_PATH=/tmp/relay.db -p 127.0.0.1:18080:8080 localhost/bot-relay-mcp:ci
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18080/healthz && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/mcp)" = 401
+          curl -fsS -X POST http://127.0.0.1:18080/mcp \
+            -H 'Authorization: Bearer ci-token' -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_peers","arguments":{}}}' \
+            | grep -q '"self":"ci-bot"'
+      - name: Container logs
+        if: always()
+        run: podman logs relay || true

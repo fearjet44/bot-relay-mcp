@@ -1,5 +1,5 @@
 import { createApp } from "./app.ts";
-import { ConfigError, loadConfig } from "./config.ts";
+import { botIds, ConfigError, loadConfig } from "./config.ts";
 import { openDatabase } from "./db.ts";
 import { RelayStore } from "./store.ts";
 
@@ -16,13 +16,13 @@ function main(): void {
   }
 
   const db = openDatabase(config.dbPath);
-  const store = new RelayStore(db, config.bots.map((b) => b.id), config);
+  const store = new RelayStore(db, botIds(config), config);
   const app = createApp({ config, store, logRequests: true });
 
   const server = app.listen(config.port, config.host, () => {
     console.log(
       `bot-relay listening on ${config.host}:${config.port} ` +
-        `(db=${config.dbPath}, bots=${config.bots.map((b) => b.id).join(",")}, ` +
+        `(db=${config.dbPath}, bots=${botIds(config).join(",")}, ` +
         `viewer=${config.viewerTokenHash ? "on" : "off"}` +
         `${config.publicHostname ? `, public=https://${config.publicHostname}/mcp` : ""})`,
     );
