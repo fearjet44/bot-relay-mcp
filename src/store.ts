@@ -40,7 +40,7 @@ export interface ThreadView {
   unread_count: number;
 }
 
-export type AuditStatus = "ok" | "error" | "rate_limited" | "unauthorized" | "forbidden";
+export type AuditStatus = "ok" | "error" | "rate_limited" | "unauthorized" | "forbidden" | "delivered" | "failed";
 
 export interface AuditEntry {
   id: number;

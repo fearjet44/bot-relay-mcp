@@ -3,6 +3,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { authenticateBot, extractBotToken, extractViewerToken, tokenMatchesHash } from "./auth.ts";
 import type { Config } from "./config.ts";
 import { buildMcpServer } from "./mcp.ts";
+import type { Notifier } from "./notify.ts";
 import { RateLimiter } from "./ratelimit.ts";
 import type { RelayStore } from "./store.ts";
 import { renderLogPage } from "./viewer.ts";
@@ -11,6 +12,7 @@ export interface AppDeps {
   config: Config;
   store: RelayStore;
   limiter?: RateLimiter;
+  notifier?: Notifier;
   logRequests?: boolean;
 }
 
@@ -95,7 +97,7 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.post("/mcp", requireBot, express.json({ limit: jsonLimit }), async (req, res) => {
     const botId = res.locals.botId as string;
-    const server = buildMcpServer({ botId, store, limiter });
+    const server = buildMcpServer({ botId, store, limiter, notifier: deps.notifier });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();

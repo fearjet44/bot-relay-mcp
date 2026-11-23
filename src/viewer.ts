@@ -39,7 +39,7 @@ export function renderLogPage(opts: {
   <td><code>${escapeHtml(a.ts)}</code></td>
   <td>${escapeHtml(a.bot_id ?? "—")}</td>
   <td>${escapeHtml(a.tool)}</td>
-  <td class="${a.status === "ok" ? "ok" : "bad"}">${escapeHtml(a.status)}${a.detail ? ` (${escapeHtml(a.detail)})` : ""}</td>
+  <td class="${a.status === "ok" || a.status === "delivered" ? "ok" : "bad"}">${escapeHtml(a.status)}${a.detail ? ` (${escapeHtml(a.detail)})` : ""}</td>
   <td><code>${escapeHtml(a.message_ids.join(", "))}</code></td>
 </tr>`,
     )

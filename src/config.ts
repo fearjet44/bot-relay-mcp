@@ -3,12 +3,19 @@ export interface BotEntry {
   tokenHash: Buffer;
 }
 
+export interface NotifyTarget {
+  url: string;
+  key: string;
+}
+
 export interface Config {
   host: string;
   port: number;
   dbPath: string;
   publicHostname: string | undefined;
   bots: BotEntry[];
+  /** Bot id -> webhook to ping when a message lands for that bot. */
+  notify: Map<string, NotifyTarget>;
   viewerTokenHash: Buffer | undefined;
   maxBodyBytes: number;
   maxSubjectChars: number;
@@ -62,6 +69,47 @@ export function parseBots(value: string | undefined): BotEntry[] {
   return bots;
 }
 
+/** `chief-of-staff` -> `CHIEF_OF_STAFF`, as used in NOTIFY_URL_<BOT> / NOTIFY_KEY_<BOT>. */
+export function notifyEnvSuffix(botId: string): string {
+  return botId.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+const NOTIFY_KEY_PATTERN = /^[\x21-\x7e]+$/;
+
+/** Error messages name the variable but never echo its value: NOTIFY_KEY_* are secrets. */
+export function parseNotifyTargets(env: NodeJS.ProcessEnv, ids: string[]): Map<string, NotifyTarget> {
+  const targets = new Map<string, NotifyTarget>();
+  const known = new Set<string>();
+  for (const id of ids) {
+    const urlName = `NOTIFY_URL_${notifyEnvSuffix(id)}`;
+    const keyName = `NOTIFY_KEY_${notifyEnvSuffix(id)}`;
+    known.add(urlName).add(keyName);
+    const rawUrl = env[urlName]?.trim();
+    const key = env[keyName]?.trim();
+    if (!rawUrl && !key) continue;
+    if (!rawUrl) throw new ConfigError(`${keyName} is set but ${urlName} is not`);
+    if (!key) throw new ConfigError(`${urlName} is set but ${keyName} is not`);
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      throw new ConfigError(`${urlName} must be a valid https:// URL`);
+    }
+    if (url.protocol !== "https:") throw new ConfigError(`${urlName} must be an https:// URL`);
+    if (url.username || url.password) throw new ConfigError(`${urlName} must not contain credentials`);
+    if (!NOTIFY_KEY_PATTERN.test(key)) {
+      throw new ConfigError(`${keyName} must be printable ASCII without spaces`);
+    }
+    targets.set(id, { url: url.href, key });
+  }
+  for (const name of Object.keys(env)) {
+    if (/^NOTIFY_(URL|KEY)_/.test(name) && env[name]?.trim() && !known.has(name)) {
+      throw new ConfigError(`${name} does not match any bot id in BOTS`);
+    }
+  }
+  return targets;
+}
+
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
   const raw = env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
@@ -74,12 +122,14 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min:
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const viewerHash = env.VIEWER_TOKEN_SHA256?.trim();
+  const bots = parseBots(env.BOTS);
   return {
     host: env.HOST?.trim() || "0.0.0.0",
     port: intFromEnv(env, "PORT", 8080, 1, 65535),
     dbPath: env.DB_PATH?.trim() || "/data/relay.db",
     publicHostname: env.PUBLIC_HOSTNAME?.trim() || undefined,
-    bots: parseBots(env.BOTS),
+    bots,
+    notify: parseNotifyTargets(env, botIds({ bots })),
     viewerTokenHash: viewerHash ? parseHash(viewerHash, "VIEWER_TOKEN_SHA256") : undefined,
     maxBodyBytes: intFromEnv(env, "MAX_BODY_BYTES", 32 * 1024, 1, 1024 * 1024),
     maxSubjectChars: intFromEnv(env, "MAX_SUBJECT_CHARS", 200, 1, 2000),

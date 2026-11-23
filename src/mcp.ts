@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import type { Notifier } from "./notify.ts";
 import type { RateLimiter } from "./ratelimit.ts";
 import { MAX_ACK_IDS, MAX_READ_LIMIT, RelayError, type RelayStore } from "./store.ts";
 
@@ -11,6 +12,7 @@ interface ToolContext {
   botId: string;
   store: RelayStore;
   limiter: RateLimiter;
+  notifier?: Notifier | undefined;
 }
 
 type Outcome = { result: Record<string, unknown>; messageIds: string[] };
@@ -83,6 +85,12 @@ export function buildMcpServer(ctx: ToolContext): McpServer {
     (args) =>
       invoke(ctx, "post_message", () => {
         const posted = ctx.store.postMessage(ctx.botId, args);
+        ctx.notifier?.messagePosted({
+          ...posted,
+          from: ctx.botId,
+          to: args.to.trim(),
+          subject: args.subject?.trim() || null,
+        });
         return { result: posted, messageIds: [posted.message_id] };
       }),
   );

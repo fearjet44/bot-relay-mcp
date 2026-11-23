@@ -9,6 +9,7 @@ import { createApp } from "../src/app.ts";
 import { sha256 } from "../src/auth.ts";
 import { botIds, loadConfig, type Config } from "../src/config.ts";
 import { openDatabase } from "../src/db.ts";
+import type { Notifier } from "../src/notify.ts";
 import { RateLimiter } from "../src/ratelimit.ts";
 import { RelayStore } from "../src/store.ts";
 
@@ -62,9 +63,17 @@ export interface ServerHarness extends Harness {
   close(): Promise<void>;
 }
 
-export async function startServer(envOverrides: Record<string, string> = {}): Promise<ServerHarness> {
+export async function startServer(
+  envOverrides: Record<string, string> = {},
+  makeNotifier?: (h: Harness) => Notifier,
+): Promise<ServerHarness> {
   const h = makeHarness(envOverrides);
-  const app = createApp({ config: h.config, store: h.store, limiter: new RateLimiter(h.config.rateLimitPerMinute) });
+  const app = createApp({
+    config: h.config,
+    store: h.store,
+    limiter: new RateLimiter(h.config.rateLimitPerMinute),
+    notifier: makeNotifier?.(h),
+  });
   const server = await new Promise<import("node:http").Server>((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
