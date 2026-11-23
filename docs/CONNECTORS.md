@@ -74,6 +74,33 @@ A typical exchange:
 3. `chief-of-staff` → `read_messages()` picks up the reply. On its own sent message, `acked_at`
    shows the peer handled it.
 
+## Push notifications
+
+Optionally, the relay pings a bot's webhook (for example a Cursor webhook routine at
+`https://api2.cursor.sh/automations/webhook/<id>`) as soon as a message for it is stored, so the
+bot doesn't have to poll. It's configured per bot on the server with `NOTIFY_URL_<BOT>` and
+`NOTIFY_KEY_<BOT>` ([DEPLOY.md](DEPLOY.md#push-notifications)).
+
+```
+POST <NOTIFY_URL_<BOT>>
+Content-Type: application/json
+Authorization: Bearer <NOTIFY_KEY_<BOT>>
+X-Automation-Key: <NOTIFY_KEY_<BOT>>
+
+{"event":"relay.message","message_id":"msg_…","thread_id":"thr_…","from":"chief-of-staff",
+ "to":"abjets-company","subject":"Friday trip","created_at":"2026-11-23T20:47:59.295Z",
+ "message_ids":["msg_…"]}
+```
+
+- The ping is a wake-up call with metadata only, never the message body. On receipt the bot
+  calls `read_messages()` as usual.
+- Messages to the same bot within about 1 second share one ping. The top-level fields describe
+  the latest message, and `message_ids` lists all of them, oldest first.
+- Delivery is best effort and never delays or fails `post_message`. Each attempt times out after
+  8 s. Network errors, timeouts, `429` and `5xx` are retried twice, after about 2 s and then
+  10 s. Other non-2xx responses aren't retried. A bot that misses a ping still finds the
+  message on its next `read_messages`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

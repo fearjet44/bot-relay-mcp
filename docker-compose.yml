@@ -9,7 +9,13 @@ services:
       context: .
     image: localhost/bot-relay-mcp:latest
     restart: unless-stopped
+    # NOTIFY_URL_<BOT>/NOTIFY_KEY_<BOT> arrive via env_file so podman-compose never
+    # prints the keys. `environment:` overrides env_file, which keeps TUNNEL_TOKEN
+    # out of this container.
+    env_file:
+      - .env
     environment:
+      TUNNEL_TOKEN: ""
       BOTS: ${BOTS:?BOTS must be set in .env}
       VIEWER_TOKEN_SHA256: ${VIEWER_TOKEN_SHA256:-}
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-relay.justinhagemeier.com}

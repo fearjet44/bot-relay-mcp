@@ -23,7 +23,7 @@ Contents:
 1. [Cloudflare setup](#1-cloudflare-setup)
 2. [Install on the server](#2-install-on-the-server)
 3. [Verify](#3-verify)
-4. [Operations](#4-operations): logs, upgrades, backups, restore, token rotation
+4. [Operations](#4-operations): logs, upgrades, backups, restore, token rotation, push notifications
 5. [Running without the cloudflared sidecar](#5-running-without-the-cloudflared-sidecar)
 
 ---
@@ -120,9 +120,11 @@ Notes:
 - `podman compose` delegates to `podman-compose` or `docker-compose`, whichever is installed.
   Both work with this file, which has been tested with podman-compose 1.0.6 on Podman 4.9 in
   rootless mode.
-- `TUNNEL_TOKEN` reaches only the `cloudflared` container, through `env_file`. podman-compose
-  echoes every `podman run` command it executes, but those commands contain only the
-  `BOTS`/viewer **hashes**, never the tunnel token.
+- Both containers read `.env` through `env_file`, which podman-compose passes as a file rather
+  than on the command line. podman-compose echoes every `podman run` command it executes, but
+  those commands contain only the `BOTS`/viewer **hashes**, never the tunnel token or the
+  `NOTIFY_KEY_*` values. The relay's `environment:` blanks `TUNNEL_TOKEN`, so it reaches only
+  `cloudflared`.
 - To start the stack after a reboot, rootless containers with `restart: unless-stopped` need
   Podman's restart service and user lingering:
   `systemctl --user enable podman-restart.service` and `loginctl enable-linger "$USER"`.
@@ -221,6 +223,30 @@ To rotate Cloudflare service tokens, use **Access → Service auth → Service T
 (or create a new token, add it to the policy, switch the connector, then delete the old one).
 For the tunnel token, see Cloudflare's tunnel token rotation in the tunnel's settings, then
 update `TUNNEL_TOKEN` and restart `cloudflared`.
+
+### Push notifications
+
+By default the bots poll `read_messages`. To wake a bot the moment mail lands for it, give the
+relay a webhook for that bot in `.env`, where `<BOT>` is the bot id uppercased with dashes as
+underscores:
+
+```bash
+NOTIFY_URL_CHIEF_OF_STAFF=https://api2.cursor.sh/automations/webhook/<id>
+NOTIFY_KEY_CHIEF_OF_STAFF=<webhook key>
+NOTIFY_URL_ABJETS_COMPANY=https://api2.cursor.sh/automations/webhook/<id>
+NOTIFY_KEY_ABJETS_COMPANY=<webhook key>
+```
+
+Then run `podman compose down && podman compose up -d`. The startup line shows which bots have
+push enabled, e.g. `notify=chief-of-staff`. The relay refuses to start (`config error: ...`) on
+a non-https URL, a URL without a key or the reverse, or a `NOTIFY_*` name that matches no bot in
+`BOTS`. Errors name the variable, never its value. Check that a key is set with
+`grep -c '^NOTIFY_KEY_CHIEF_OF_STAFF=.\+' .env`, not by printing it.
+
+Each delivery shows up in the relay log (`notify bot=... delivered http_200 attempts=1`) and in
+`/log` as tool `notify` with status `delivered` or `failed`. The ping format is in
+[CONNECTORS.md](CONNECTORS.md#push-notifications). To rotate a key, update it in `.env` and in
+the receiver, then restart the relay.
 
 ### Revoking a bot immediately
 

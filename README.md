@@ -109,6 +109,7 @@ All configuration comes from environment variables. See [`.env.example`](.env.ex
 | `MAX_BODY_BYTES` | `32768` | Message body cap (bytes) |
 | `MAX_SUBJECT_CHARS` | `200` | Subject cap |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-bot tool-call budget |
+| `NOTIFY_URL_<BOT>` / `NOTIFY_KEY_<BOT>` | unset (no push) | Optional https webhook + key pinged when mail lands for that bot ([push notifications](docs/CONNECTORS.md#push-notifications)) |
 
 ### Generating tokens
 
@@ -151,6 +152,7 @@ src/
   db.ts         schema, WAL pragmas, append-only triggers
   auth.ts       token extraction, SHA-256 + constant-time comparison
   config.ts     env parsing
+  notify.ts     webhook push notifications (coalesce, retry, audit)
   ratelimit.ts  per-bot token bucket
   viewer.ts     /log HTML (escaped)
 scripts/        hash-token, backup, container healthcheck
