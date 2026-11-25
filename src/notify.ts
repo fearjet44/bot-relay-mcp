@@ -1,3 +1,4 @@
+import { createHmac, randomUUID } from "node:crypto";
 import type { NotifyTarget } from "./config.ts";
 import type { RelayStore } from "./store.ts";
 
@@ -19,7 +20,14 @@ export interface NotifierOptions {
   log?: boolean;
 }
 
+export type TargetResolver = ReadonlyMap<string, NotifyTarget> | ((botId: string) => NotifyTarget | undefined);
+
 type AttemptResult = { ok: true; detail: string } | { ok: false; retry: boolean; detail: string };
+
+export function signWebhookPayload(secret: string, timestamp: string, body: string): string {
+  const digest = createHmac("sha256", secret).update(`${timestamp}.${body}`, "utf8").digest("hex");
+  return `sha256=${digest}`;
+}
 
 function describeError(err: unknown): string {
   if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) return "timeout";
@@ -29,11 +37,12 @@ function describeError(err: unknown): string {
 
 /**
  * Fire-and-forget webhook pings telling a bot that mail is waiting. The ping
- * carries metadata only (never the body), and its outcome goes to the audit log.
+ * carries metadata only (never the body), signs payloads with HMAC-SHA256 when
+ * a secret is configured, and records its outcome in the audit log.
  * Nothing here can throw into, or delay, the post_message call that triggered it.
  */
 export class Notifier {
-  private readonly targets: ReadonlyMap<string, NotifyTarget>;
+  private readonly resolveTarget: (botId: string) => NotifyTarget | undefined;
   private readonly store: RelayStore;
   private readonly timeoutMs: number;
   private readonly retryDelaysMs: number[];
@@ -42,8 +51,9 @@ export class Notifier {
   private readonly pending = new Map<string, { events: MessageEvent[]; timer: NodeJS.Timeout }>();
   private readonly inflight = new Set<Promise<void>>();
 
-  constructor(targets: ReadonlyMap<string, NotifyTarget>, store: RelayStore, opts: NotifierOptions = {}) {
-    this.targets = targets;
+  constructor(targetSource: TargetResolver, store: RelayStore, opts: NotifierOptions = {}) {
+    this.resolveTarget =
+      typeof targetSource === "function" ? targetSource : (botId: string) => targetSource.get(botId);
     this.store = store;
     this.timeoutMs = opts.timeoutMs ?? 8_000;
     this.retryDelaysMs = opts.retryDelaysMs ?? [2_000, 10_000];
@@ -52,7 +62,13 @@ export class Notifier {
   }
 
   messagePosted(event: MessageEvent): void {
-    if (!this.targets.has(event.to)) return;
+    let target: NotifyTarget | undefined;
+    try {
+      target = this.resolveTarget(event.to);
+    } catch {
+      return;
+    }
+    if (!target) return;
     const batch = this.pending.get(event.to);
     if (batch) {
       batch.events.push(event);
@@ -60,6 +76,28 @@ export class Notifier {
     }
     const timer = setTimeout(() => this.flush(event.to), this.coalesceMs).unref();
     this.pending.set(event.to, { events: [event], timer });
+  }
+
+  /** Sends a single non-retried test ping to a bot's configured webhook. */
+  async sendTest(botId: string): Promise<{ ok: boolean; detail: string; durationMs: number }> {
+    const target = this.resolveTarget(botId);
+    if (!target) return { ok: false, detail: "no_webhook_configured", durationMs: 0 };
+    const started = Date.now();
+    const body = JSON.stringify({
+      event: "relay.test",
+      to: botId,
+      created_at: new Date().toISOString(),
+    });
+    const result = await this.attempt(target, body, "relay.test");
+    const durationMs = Date.now() - started;
+    const status = result.ok ? "delivered" : "failed";
+    this.store.recordWebhookOutcome(botId, `test_${status}:${result.detail}`);
+    try {
+      this.store.audit(botId, "notify.test", [], status, result.detail);
+    } catch {
+      // Ignore if DB closing.
+    }
+    return { ok: result.ok, detail: result.detail, durationMs };
   }
 
   /** Sends any coalescing batches now and waits for every delivery (including retries) to finish. */
@@ -80,7 +118,8 @@ export class Notifier {
   }
 
   private async deliver(to: string, events: MessageEvent[]): Promise<void> {
-    const target = this.targets.get(to)!;
+    const target = this.resolveTarget(to);
+    if (!target) return;
     const latest = events.at(-1)!;
     const messageIds = events.map((e) => e.message_id);
     const body = JSON.stringify({
@@ -97,7 +136,7 @@ export class Notifier {
     let attempts = 0;
     let result: AttemptResult;
     for (;;) {
-      result = await this.attempt(target, body);
+      result = await this.attempt(target, body, "relay.message");
       attempts++;
       if (result.ok || !result.retry || attempts > this.retryDelaysMs.length) break;
       const delay = this.retryDelaysMs[attempts - 1]!;
@@ -107,6 +146,7 @@ export class Notifier {
     const status = result.ok ? "delivered" : "failed";
     const detail = `${result.detail} attempts=${attempts}`;
     if (this.log) console.log(`notify bot=${to} ${status} ${detail} messages=${messageIds.length}`);
+    this.store.recordWebhookOutcome(to, `${status}:${result.detail}`);
     try {
       this.store.audit(to, "notify", messageIds, status, detail);
     } catch {
@@ -114,15 +154,23 @@ export class Notifier {
     }
   }
 
-  private async attempt(target: NotifyTarget, body: string): Promise<AttemptResult> {
+  private async attempt(target: NotifyTarget, body: string, eventName: string): Promise<AttemptResult> {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Relay-Event": eventName,
+      "X-Relay-Delivery": `del_${randomUUID()}`,
+      "X-Relay-Timestamp": timestamp,
+    };
+    if (target.key) {
+      headers.Authorization = `Bearer ${target.key}`;
+      headers["X-Automation-Key"] = target.key;
+      headers["X-Relay-Signature-256"] = signWebhookPayload(target.key, timestamp, body);
+    }
     try {
       const res = await fetch(target.url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${target.key}`,
-          "X-Automation-Key": target.key,
-        },
+        headers,
         body,
         redirect: "manual",
         signal: AbortSignal.timeout(this.timeoutMs),

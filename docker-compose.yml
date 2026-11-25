@@ -1,31 +1,45 @@
-# Works with rootless Podman (`podman compose up -d` / `podman-compose up -d`).
-# No published ports: the relay is reachable only on the compose network, and
-# cloudflared carries public traffic to http://relay:8080.
+# Works out of the box with standard Docker (`docker compose up -d`) and rootless Podman
+# (`podman compose up -d`) — no .env file or Cloudflare Tunnel required.
+#
+# Ports:
+#   - 8390 -> Bot API (/mcp, /register, /events, /me, /healthz)
+#   - 8391 -> Web Admin Dashboard (manage bots, invite codes, webhooks, logs)
+#
+# Optional Cloudflare Tunnel sidecar:
+#   docker compose --profile cloudflare up -d
 name: bot-relay
 
 services:
   relay:
     build:
       context: .
-    image: localhost/bot-relay-mcp:latest
+    image: ${RELAY_IMAGE:-ghcr.io/fearjet44/bot-relay-mcp:latest}
+    user: "1000:1000"
     restart: unless-stopped
-    # NOTIFY_URL_<BOT>/NOTIFY_KEY_<BOT> arrive via env_file so podman-compose never
-    # prints the keys. `environment:` overrides env_file, which keeps TUNNEL_TOKEN
-    # out of this container.
-    env_file:
-      - .env
     environment:
-      TUNNEL_TOKEN: ""
-      BOTS: ${BOTS:?BOTS must be set in .env}
+      TZ: ${TZ:-UTC}
+      PORT: "8080"
+      ADMIN_PORT: "8081"
+      DB_PATH: /data/relay.db
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-}
       VIEWER_TOKEN_SHA256: ${VIEWER_TOKEN_SHA256:-}
-      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-relay.justinhagemeier.com}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      BOOTSTRAP_INVITE_CODE: ${BOOTSTRAP_INVITE_CODE:-}
+      BOTS: ${BOTS:-}
+      WEBHOOK_ALLOW_HTTP: ${WEBHOOK_ALLOW_HTTP:-private}
+      WEBHOOK_ALLOW_LOOPBACK: ${WEBHOOK_ALLOW_LOOPBACK:-false}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-32768}
       MAX_SUBJECT_CHARS: ${MAX_SUBJECT_CHARS:-200}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      REGISTER_RATE_LIMIT_PER_MINUTE: ${REGISTER_RATE_LIMIT_PER_MINUTE:-10}
+    ports:
+      - "${RELAY_PORT:-8390}:8080"
+      - "${ADMIN_HOST_PORT:-8391}:8081"
     volumes:
       - relay-data:/data:Z
-    expose:
-      - "8080"
     read_only: true
     tmpfs:
       - /tmp
@@ -41,16 +55,14 @@ services:
       retries: 3
       start_period: 10s
 
-  # Remove this service if cloudflared is managed outside this stack (e.g. by
-  # Omarchy); then point that tunnel's public hostname at the relay container.
+  # Optional: start with `docker compose --profile cloudflare up -d` if exposing over Cloudflare Tunnel.
   cloudflared:
+    profiles: ["cloudflare"]
     image: ${CLOUDFLARED_IMAGE:-docker.io/cloudflare/cloudflared:latest}
     restart: unless-stopped
     command: ["tunnel", "--no-autoupdate", "run"]
-    # TUNNEL_TOKEN is read from .env via env_file (not `environment:`) so that
-    # podman-compose, which echoes each `podman run` command, never prints it.
-    env_file:
-      - .env
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:
       - relay
     cap_drop:

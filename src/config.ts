@@ -1,3 +1,13 @@
+import { createHash } from "node:crypto";
+import {
+  DEFAULT_WEBHOOK_POLICY,
+  validateWebhookSecret,
+  validateWebhookUrl,
+  WebhookUrlError,
+  type WebhookHttpPolicy,
+  type WebhookPolicy,
+} from "./webhook-url.ts";
+
 export interface BotEntry {
   id: string;
   tokenHash: Buffer;
@@ -5,21 +15,30 @@ export interface BotEntry {
 
 export interface NotifyTarget {
   url: string;
-  key: string;
+  key: string | null;
 }
 
 export interface Config {
   host: string;
   port: number;
+  adminHost: string;
+  adminPort: number | undefined;
   dbPath: string;
   publicHostname: string | undefined;
+  publicUrl: string | undefined;
   bots: BotEntry[];
-  /** Bot id -> webhook to ping when a message lands for that bot. */
+  /** Bot id -> static env webhook to ping when a message lands for that bot. */
   notify: Map<string, NotifyTarget>;
   viewerTokenHash: Buffer | undefined;
+  adminTokenHash: Buffer | undefined;
+  adminGatewayKey: string | undefined;
+  encryptionKey: string | undefined;
+  bootstrapInviteCode: string | undefined;
+  webhookPolicy: WebhookPolicy;
   maxBodyBytes: number;
   maxSubjectChars: number;
   rateLimitPerMinute: number;
+  registerRateLimitPerMinute: number;
 }
 
 export function botIds(config: Pick<Config, "bots">): string[] {
@@ -40,12 +59,13 @@ export function parseHash(value: string, label: string): Buffer {
 }
 
 /**
- * Parses `BOTS="chief-of-staff:<sha256>,abjets-company:<sha256>"`. An id may
+ * Parses `BOTS="bot-a:<sha256>,bot-b:<sha256>"`. Optional in v2 (returns `[]`
+ * when unset/empty so bots can be registered dynamically in SQLite). An id may
  * appear more than once (with different hashes) to rotate its token without downtime.
  */
 export function parseBots(value: string | undefined): BotEntry[] {
   if (!value || !value.trim()) {
-    throw new ConfigError("BOTS is required (format: id:sha256hex,id:sha256hex)");
+    return [];
   }
   const bots: BotEntry[] = [];
   const seenHashes = new Set<string>();
@@ -65,7 +85,7 @@ export function parseBots(value: string | undefined): BotEntry[] {
     seenHashes.add(tokenHash.toString("hex"));
     bots.push({ id, tokenHash });
   }
-  if (bots.length === 0) throw new ConfigError("BOTS must list at least one bot");
+  if (bots.length === 0) throw new ConfigError("BOTS must list at least one bot when set");
   return bots;
 }
 
@@ -74,10 +94,12 @@ export function notifyEnvSuffix(botId: string): string {
   return botId.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
-const NOTIFY_KEY_PATTERN = /^[\x21-\x7e]+$/;
-
 /** Error messages name the variable but never echo its value: NOTIFY_KEY_* are secrets. */
-export function parseNotifyTargets(env: NodeJS.ProcessEnv, ids: string[]): Map<string, NotifyTarget> {
+export function parseNotifyTargets(
+  env: NodeJS.ProcessEnv,
+  ids: string[],
+  webhookPolicy: WebhookPolicy = DEFAULT_WEBHOOK_POLICY,
+): Map<string, NotifyTarget> {
   const targets = new Map<string, NotifyTarget>();
   const known = new Set<string>();
   for (const id of ids) {
@@ -85,22 +107,24 @@ export function parseNotifyTargets(env: NodeJS.ProcessEnv, ids: string[]): Map<s
     const keyName = `NOTIFY_KEY_${notifyEnvSuffix(id)}`;
     known.add(urlName).add(keyName);
     const rawUrl = env[urlName]?.trim();
-    const key = env[keyName]?.trim();
-    if (!rawUrl && !key) continue;
+    const rawKey = env[keyName]?.trim();
+    if (!rawUrl && !rawKey) continue;
     if (!rawUrl) throw new ConfigError(`${keyName} is set but ${urlName} is not`);
-    if (!key) throw new ConfigError(`${urlName} is set but ${keyName} is not`);
-    let url: URL;
+    if (!rawKey) throw new ConfigError(`${urlName} is set but ${keyName} is not`);
+    let href: string;
     try {
-      url = new URL(rawUrl);
-    } catch {
-      throw new ConfigError(`${urlName} must be a valid https:// URL`);
+      href = validateWebhookUrl(rawUrl, webhookPolicy);
+    } catch (err) {
+      const msg = err instanceof WebhookUrlError ? err.message : "must be a valid webhook URL";
+      throw new ConfigError(`${urlName} ${msg}`);
     }
-    if (url.protocol !== "https:") throw new ConfigError(`${urlName} must be an https:// URL`);
-    if (url.username || url.password) throw new ConfigError(`${urlName} must not contain credentials`);
-    if (!NOTIFY_KEY_PATTERN.test(key)) {
+    let key: string;
+    try {
+      key = validateWebhookSecret(rawKey);
+    } catch {
       throw new ConfigError(`${keyName} must be printable ASCII without spaces`);
     }
-    targets.set(id, { url: url.href, key });
+    targets.set(id, { url: href, key });
   }
   for (const name of Object.keys(env)) {
     if (/^NOTIFY_(URL|KEY)_/.test(name) && env[name]?.trim() && !known.has(name)) {
@@ -120,19 +144,94 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min:
   return n;
 }
 
+function optionalIntFromEnv(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new ConfigError(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return n;
+}
+
+function boolFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === "true" || raw === "1" || raw === "yes") return true;
+  if (raw === "false" || raw === "0" || raw === "no") return false;
+  throw new ConfigError(`${name} must be true or false`);
+}
+
+function parseWebhookHttpPolicy(env: NodeJS.ProcessEnv): WebhookHttpPolicy {
+  const raw = env.WEBHOOK_ALLOW_HTTP?.trim().toLowerCase();
+  if (!raw) return "private";
+  if (raw === "private" || raw === "always" || raw === "never") return raw;
+  if (raw === "true") return "always";
+  if (raw === "false") return "never";
+  throw new ConfigError('WEBHOOK_ALLOW_HTTP must be "private", "always", or "never"');
+}
+
+function parsePublicUrl(raw: string | undefined, hostname: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return hostname ? `https://${hostname}` : undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new ConfigError("PUBLIC_URL must be a valid http:// or https:// URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new ConfigError("PUBLIC_URL must use http:// or https://");
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const host = env.HOST?.trim() || "0.0.0.0";
+  const port = intFromEnv(env, "PORT", 8080, 1, 65535);
+  const adminHost = env.ADMIN_HOST?.trim() || host;
+  const adminPort = optionalIntFromEnv(env, "ADMIN_PORT", 1, 65535);
+  if (adminPort !== undefined && adminPort === port && adminHost === host) {
+    throw new ConfigError("ADMIN_PORT must differ from PORT when bound to the same host");
+  }
+
   const viewerHash = env.VIEWER_TOKEN_SHA256?.trim();
+  const adminHashRaw = env.ADMIN_TOKEN_SHA256?.trim();
+  const adminPassword = env.ADMIN_PASSWORD?.trim();
+  const adminTokenHash = adminHashRaw
+    ? parseHash(adminHashRaw, "ADMIN_TOKEN_SHA256")
+    : adminPassword
+      ? createHash("sha256").update(adminPassword, "utf8").digest()
+      : undefined;
+
+  const webhookPolicy: WebhookPolicy = {
+    allowHttp: parseWebhookHttpPolicy(env),
+    allowLoopback: boolFromEnv(env, "WEBHOOK_ALLOW_LOOPBACK", false),
+  };
+
   const bots = parseBots(env.BOTS);
+  const publicHostname = env.PUBLIC_HOSTNAME?.trim() || undefined;
+  const publicUrl = parsePublicUrl(env.PUBLIC_URL, publicHostname);
+
   return {
-    host: env.HOST?.trim() || "0.0.0.0",
-    port: intFromEnv(env, "PORT", 8080, 1, 65535),
+    host,
+    port,
+    adminHost,
+    adminPort,
     dbPath: env.DB_PATH?.trim() || "/data/relay.db",
-    publicHostname: env.PUBLIC_HOSTNAME?.trim() || undefined,
+    publicHostname,
+    publicUrl,
     bots,
-    notify: parseNotifyTargets(env, botIds({ bots })),
+    notify: parseNotifyTargets(env, botIds({ bots }), webhookPolicy),
     viewerTokenHash: viewerHash ? parseHash(viewerHash, "VIEWER_TOKEN_SHA256") : undefined,
+    adminTokenHash,
+    adminGatewayKey: env.ADMIN_GATEWAY_KEY?.trim() || undefined,
+    encryptionKey: env.ENCRYPTION_KEY?.trim() || env.APP_SEED?.trim() || undefined,
+    bootstrapInviteCode: env.BOOTSTRAP_INVITE_CODE?.trim() || undefined,
+    webhookPolicy,
     maxBodyBytes: intFromEnv(env, "MAX_BODY_BYTES", 32 * 1024, 1, 1024 * 1024),
     maxSubjectChars: intFromEnv(env, "MAX_SUBJECT_CHARS", 200, 1, 2000),
     rateLimitPerMinute: intFromEnv(env, "RATE_LIMIT_PER_MINUTE", 120, 1, 100_000),
+    registerRateLimitPerMinute: intFromEnv(env, "REGISTER_RATE_LIMIT_PER_MINUTE", 10, 1, 1_000),
   };
 }

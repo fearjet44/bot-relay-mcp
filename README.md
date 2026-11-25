@@ -1,42 +1,72 @@
 # bot-relay-mcp
 
-A small, private message relay that lets two Grok Bots (Justin's personal
-**`chief-of-staff`** and the **`abjets-company`** bot) talk to each other through
-MCP, without sharing a Slack login or any other account.
+A self-hosted, private message relay and real-time push hub that lets AI bots talk to each other
+over **MCP (Streamable HTTP)** — without sharing a Slack login or relying on third-party webhook
+brokers.
+
+Built for **local networks, Tailscale tailnets, [My Own Data Center](https://github.com/MyOwnDataCenter/Server),
+and standard Docker**.
+
+## Highlights
 
 - **Remote MCP server** over Streamable HTTP at `POST /mcp` (official MCP TypeScript SDK, Node 22).
-- **Identity from the token.** Each bot has its own bearer token. The server stores only
-  SHA-256 hashes, and the sender of a message is always derived from the token. No tool
-  accepts a `from` argument.
-- **SQLite** at `/data/relay.db` (WAL), with an **append-only audit log** enforced by SQLite triggers.
-- **Read-only web view** at `GET /log` (separate viewer token), and `GET /healthz`.
-- **Deploys as two containers** under rootless Podman, `relay` and a `cloudflared` sidecar,
-  behind Cloudflare Tunnel + Cloudflare Access. No host ports are published.
+- **Bot self-registration with approval codes:** Generate expiring, single-use or multi-use invite
+  codes in the Web Admin UI (or CLI). Give a code to a bot, and it calls `POST /register` to
+  receive its own bearer token (shown once; stored only as a SHA-256 hash).
+- **Dual push notifications (no 3rd-party broker needed):**
+  - **Built-in SSE stream (`GET /events`):** Bots connect outbound with their bearer token to
+    receive instant metadata-only wake-up pings — zero inbound ports needed on the bot's machine,
+    with `Last-Event-ID` catch-up on reconnect.
+  - **Dynamic LAN / Tailnet webhooks:** Bots (via `set_webhook` / `PUT /me/webhook` / `/register`)
+    or the owner (via the Admin UI) can register `http://` (private LAN/Tailnet/Docker) or
+    `https://` callback URLs with HMAC-SHA256 signatures (`X-Relay-Signature-256`) and encrypted
+    secret storage at rest.
+- **Built-in Web Admin Dashboard:** Manage bots, generate approval codes (with copyable `curl` and
+  AI bot setup prompts), test webhooks, rotate/revoke tokens, and inspect messages and the
+  append-only audit log.
+- **Identity from the token:** Every bot has its own bearer token. The sender of a message is
+  always derived from the token — no tool accepts a `from` argument.
+- **SQLite WAL + append-only audit log:** Single-file SQLite database (`/data/relay.db`) using
+  Node 22's built-in `node:sqlite`, with `BEFORE UPDATE` / `BEFORE DELETE` triggers protecting the
+  audit trail.
+- **Zero-config Docker & native My Own Data Center integration:** Starts with zero required
+  environment variables. On My Own Data Center, the Admin UI sits behind MODC's sign-in gateway
+  (automatic SSO via `APP_GATEWAY_KEY`), while the Bot API port (`8390`) is opened directly for
+  LAN/Tailnet bots. Optional Cloudflare Tunnel support is still available via Compose profile.
 
-```
-Grok (bot A) ──HTTPS + CF Access service token + Bearer──▶ Cloudflare Access
-                                                             │
-                                              Cloudflare Tunnel (outbound only)
-                                                             │
-                                  cloudflared ──▶ http://relay:8080/mcp ──▶ SQLite /data/relay.db
+## Quick start (Docker / Podman)
+
+```bash
+git clone https://github.com/fearjet44/bot-relay-mcp.git
+cd bot-relay-mcp
+docker compose up -d          # or: podman compose up -d
+docker compose logs relay     # copy the one-time first-run Admin Password
 ```
 
-Public URL: `https://relay.justinhagemeier.com/mcp` (set via `PUBLIC_HOSTNAME`).
+1. Open the **Admin Dashboard** at `http://localhost:8391` and sign in.
+2. Go to **Invite Codes** → **Create Code** to generate an approval code.
+3. Have each bot register against `http://<your-server>:8390/register`:
+
+```bash
+curl -sS -X POST 'http://localhost:8390/register' \
+  -H 'Content-Type: application/json' \
+  -d '{"code":"join_...","bot_id":"my-bot","webhook_url":"http://my-bot.tailnet.ts.net:9090/hook"}'
+```
+
+The bot receives its `token`, `mcp_url`, and `events_url` once, and can immediately connect over
+MCP (`POST /mcp`) and SSE (`GET /events`).
+
+## Docs
 
 | Doc | What's in it |
 | --- | --- |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | Omarchy Server deploy, Cloudflare Tunnel + Access setup, upgrades, backups, token rotation |
-| [docs/CONNECTORS.md](docs/CONNECTORS.md) | Exact connector URL + headers for each bot |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | My Own Data Center install, standard Docker/Podman setup, backups, optional Cloudflare Tunnel |
+| [docs/CONNECTORS.md](docs/CONNECTORS.md) | Self-registration, MCP connector setup, SSE `GET /events` push, local/Tailnet webhook HMAC verification |
 
-> **Never paste a token into a chat, issue, PR, or log**, including chats with the bots
-> themselves. That covers relay tokens, the viewer token, Cloudflare service-token secrets,
-> the tunnel token, and Omarchy `keys.json` keys. Tokens go only into the connector's secret
-> fields and (as hashes) into `.env` on the server.
+## MCP Tools
 
-## Tools
-
-The caller is always the bot that owns the bearer token. A bot can read only messages
-addressed to it or sent by it.
+The caller is always the bot that owns the bearer token. A bot can read only messages addressed to
+it or sent by it.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -45,116 +75,66 @@ addressed to it or sent by it.
 | `read_messages` | `unread_only=true`, `since?`, `thread_id?`, `limit=50`, `mark_read=false` | `{messages[], has_more, marked_read}` |
 | `list_threads` | `limit=20`, `since?` | `{threads[]}` with `peer`, `message_count`, `unread_count` |
 | `ack` | `message_ids[]` | `{acked[], not_found[]}` |
+| `get_webhook` | — | `{url, enabled, has_secret, source, last_status, last_at}` |
+| `set_webhook` | `url` (`string \| null`), `secret?`, `enabled?` | updated webhook metadata |
 
-Semantics:
+## HTTP Endpoints
 
-- **Threads** are between exactly two bots. Omit `thread_id` to start a new thread. To reply,
-  pass the `thread_id` and the other participant as `to`.
-- **`read_messages` does not change state** unless `mark_read=true`.
-  - With `unread_only=true` (the default), it returns unread messages addressed to you, oldest
-    first. Page through them with `mark_read=true` or `ack`.
-  - With `unread_only=false`, it returns both incoming and outgoing messages: the most recent
-    `limit` (in chronological order), or everything strictly after `since`, oldest first.
-- **`ack`** marks messages addressed to you as read and acknowledged. It is idempotent. Ids that
-  aren't addressed to you come back in `not_found`, so `ack` doesn't reveal whether they exist.
-- Each message carries the recipient's `read_at`/`acked_at`, so the sender can see when the
-  peer has read or acknowledged it.
-- **Limits:**
-  - Message bodies: 32 KB max in UTF-8 bytes (`MAX_BODY_BYTES`).
-  - Subjects: 200 characters max (`MAX_SUBJECT_CHARS`).
-  - Rate: 120 tool calls per minute per bot, as a token bucket (`RATE_LIMIT_PER_MINUTE`).
-    Over-limit calls return a `rate_limited` tool error.
-- **Errors** come back as MCP tool errors (`isError: true`) with a JSON body
-  `{"error": "<code>", "message": "..."}`. Codes include `unknown_recipient`, `body_too_large`,
-  `thread_not_found`, `thread_mismatch` and `rate_limited`.
+### Bot API (`PORT=8080`, host `8390`)
 
-## HTTP endpoints
-
-| Endpoint | Auth | Notes |
+| Endpoint | Auth | Purpose |
 | --- | --- | --- |
-| `POST /mcp` | bot token | MCP Streamable HTTP, stateless, JSON responses |
-| `GET /mcp`, `DELETE /mcp` | bot token | `405`: the server is stateless, so there's no standalone SSE stream and no sessions |
-| `GET /log` | viewer token (Bearer, or Basic with the token as password) | Read-only HTML of recent messages and audit entries. `404` if `VIEWER_TOKEN_SHA256` is unset |
-| `GET /healthz` | none | `{"status":"ok"}`. Returns no data |
+| `POST /register` | Approval code (IP rate-limited) | Self-register a new bot and receive its one-time bearer token |
+| `POST /mcp` | Bot Bearer token (`Authorization` or `X-Relay-Token`) | Stateless MCP Streamable HTTP endpoint |
+| `GET /events` | Bot Bearer token | Real-time SSE push stream (`Last-Event-ID` catch-up + heartbeats) |
+| `GET /me` | Bot Bearer token | Bot profile, endpoints, unread count, webhook & SSE status |
+| `PUT /me/webhook` | Bot Bearer token | Set, update, or remove this bot's outbound webhook |
+| `POST /me/token/rotate` | Bot Bearer token | Issue a fresh bearer token (with optional `revoke_others`) |
+| `GET /healthz` | None | `{"status":"ok"}` |
 
-The bot token is read from `X-Relay-Token` if that header is present, otherwise from
-`Authorization: Bearer <token>`. Token digests are compared with `crypto.timingSafeEqual`
-against every configured hash, with no early exit.
+### Admin Dashboard (`ADMIN_PORT=8081`, host `8391` — or unified on `PORT` if `ADMIN_PORT` is unset)
 
-## Audit log
-
-Every tool call writes one row to `audit_log`: `ts`, `bot_id`, `tool`, `message_ids`
-(JSON array), `status` (`ok`, `error`, `rate_limited` or `unauthorized`) and a short `detail`
-code. Failed authentication attempts on `/mcp` and accesses to `/log` are recorded too, with
-`bot_id = NULL`.
-
-The log never contains tokens, header values or message bodies. `BEFORE UPDATE` and
-`BEFORE DELETE` triggers abort any attempt to modify or delete rows.
-
-Calls the MCP SDK rejects during argument type validation, such as `to: 42`, never reach the
-tool handler and aren't audited.
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /` | Admin session / MODC gateway | Interactive Web Admin Dashboard |
+| `/api/admin/*` | Admin token / cookie / MODC gateway | Manage bots, invite codes, webhooks, messages, audit log |
+| `GET /log` | Viewer token (`VIEWER_TOKEN_SHA256`) or Admin auth | Legacy read-only HTML log view |
+| `GET /healthz` | None | `{"status":"ok"}` |
 
 ## Configuration
 
-All configuration comes from environment variables. See [`.env.example`](.env.example).
+All environment variables are optional. See [`.env.example`](.env.example).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BOTS` | *required* | `id:sha256hex,id:sha256hex`. An id may appear twice during token rotation |
-| `VIEWER_TOKEN_SHA256` | unset (`/log` disabled) | SHA-256 of the `/log` viewer token |
-| `PUBLIC_HOSTNAME` | `relay.justinhagemeier.com` in compose | Used in logs and the `/log` page title |
-| `TUNNEL_TOKEN` | *required by compose* | Cloudflare Tunnel token. Only the `cloudflared` container gets it |
-| `DB_PATH` | `/data/relay.db` | SQLite file |
-| `PORT` / `HOST` | `8080` / `0.0.0.0` | Listener inside the container |
-| `MAX_BODY_BYTES` | `32768` | Message body cap (bytes) |
-| `MAX_SUBJECT_CHARS` | `200` | Subject cap |
-| `RATE_LIMIT_PER_MINUTE` | `120` | Per-bot tool-call budget |
-| `NOTIFY_URL_<BOT>` / `NOTIFY_KEY_<BOT>` | unset (no push) | Optional https webhook + key pinged when mail lands for that bot ([push notifications](docs/CONNECTORS.md#push-notifications)) |
-
-### Generating tokens
-
-```bash
-npm run hash-token -- chief-of-staff      # prints TOKEN, SHA256 and a ready BOTS entry
-npm run hash-token -- abjets-company
-npm run hash-token -- viewer              # for VIEWER_TOKEN_SHA256
-# no Node on the host? use the built image:
-podman run --rm localhost/bot-relay-mcp:latest node scripts/hash-token.mjs chief-of-staff
-# hash an existing token (prints only the hash):
-npm run hash-token -- --stdin < token.txt
-```
-
-The token is printed **once**, to your terminal. Put the `SHA256` / `BOTS entry` into `.env`,
-and the `TOKEN` straight into that bot's connector config. Don't save it anywhere else and don't
-paste it into a chat.
+| `PORT` / `HOST` | `8080` / `0.0.0.0` | Bot API listener |
+| `ADMIN_PORT` / `ADMIN_HOST` | unset (unified) / `HOST` | Separate Admin Dashboard listener (used in Docker & MODC) |
+| `DB_PATH` | `/data/relay.db` | SQLite database path |
+| `PUBLIC_URL` | derived from `Host` | Base URL shown in UI snippets and returned by `POST /register` |
+| `ADMIN_PASSWORD` / `ADMIN_TOKEN_SHA256` | auto-generated on first boot | Admin UI/API credential (prefer SHA-256 hash in `.env`) |
+| `ADMIN_GATEWAY_KEY` | unset | Trusted `x-omarchy-gateway` header key (My Own Data Center SSO) |
+| `ENCRYPTION_KEY` (or `APP_SEED`) | auto-generated `/data/.relay.key` | AES-256-GCM key encrypting DB-stored webhook secrets at rest |
+| `BOOTSTRAP_INVITE_CODE` | unset | Optional initial approval code seeded into SQLite on startup |
+| `WEBHOOK_ALLOW_HTTP` | `private` | `private` (LAN/Tailnet/Docker `http://` + public `https://`), `always`, or `never` |
+| `WEBHOOK_ALLOW_LOOPBACK` | `false` | Allow `127.0.0.1` / `localhost` webhook targets |
+| `BOTS` | unset | Optional static `id:sha256hex,...` entries (fully backwards compatible) |
+| `VIEWER_TOKEN_SHA256` | unset | Optional separate read-only `/log` viewer token hash |
+| `NOTIFY_URL_<BOT>` / `NOTIFY_KEY_<BOT>` | unset | Optional static env webhook fallback for bots in `BOTS` |
+| `MAX_BODY_BYTES` / `MAX_SUBJECT_CHARS` | `32768` / `200` | Message body and subject caps |
+| `RATE_LIMIT_PER_MINUTE` | `120` | Per-bot MCP tool call budget |
+| `REGISTER_RATE_LIMIT_PER_MINUTE` | `10` | Per-IP rate limit on `POST /register` |
 
 ## Development
 
-Requires Node.js ≥ 22.18, which runs the TypeScript tests directly via type stripping.
+Requires Node.js ≥ 22.18.
 
 ```bash
 npm ci
-npm test             # node:test: unit, HTTP and end-to-end (MCP SDK client over Streamable HTTP)
 npm run typecheck
-npm run build && BOTS=... DB_PATH=./data/relay.db npm start
+npm run build
+npm test
 ```
 
-SQLite comes from Node's built-in `node:sqlite`, so there are no native modules to compile. It
-still prints an "experimental" warning, which the `start` and `test` scripts silence.
+## License
 
-## Layout
-
-```
-src/
-  index.ts      process entry: config, DB, HTTP listener, graceful shutdown
-  app.ts        Express routes: /mcp, /log, /healthz, auth middleware
-  mcp.ts        MCP tools (per-request server bound to the authenticated bot)
-  store.ts      SQLite queries: messages, threads, receipts, audit
-  db.ts         schema, WAL pragmas, append-only triggers
-  auth.ts       token extraction, SHA-256 + constant-time comparison
-  config.ts     env parsing
-  notify.ts     webhook push notifications (coalesce, retry, audit)
-  ratelimit.ts  per-bot token bucket
-  viewer.ts     /log HTML (escaped)
-scripts/        hash-token, backup, container healthcheck
-test/           node:test suites
-```
+[Apache-2.0](LICENSE)

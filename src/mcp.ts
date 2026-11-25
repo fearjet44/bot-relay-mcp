@@ -1,18 +1,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import type { EventHub } from "./events.ts";
 import type { Notifier } from "./notify.ts";
 import type { RateLimiter } from "./ratelimit.ts";
 import { MAX_ACK_IDS, MAX_READ_LIMIT, RelayError, type RelayStore } from "./store.ts";
 
 export const SERVER_NAME = "bot-relay";
-export const SERVER_VERSION = "1.0.0";
+export const SERVER_VERSION = "2.0.0";
 
 interface ToolContext {
   botId: string;
   store: RelayStore;
   limiter: RateLimiter;
   notifier?: Notifier | undefined;
+  events?: EventHub | undefined;
 }
 
 type Outcome = { result: Record<string, unknown>; messageIds: string[] };
@@ -53,7 +55,8 @@ export function buildMcpServer(ctx: ToolContext): McpServer {
       instructions:
         `You are connected to a private message relay as "${ctx.botId}". ` +
         "Use list_peers to see who you can message, post_message to send, read_messages to fetch your inbox " +
-        "(unread by default), and ack to confirm you have handled messages.",
+        "(unread by default), ack to confirm you have handled messages, and set_webhook/get_webhook to manage " +
+        "push notifications (or subscribe to GET /events for real-time SSE pings).",
     },
   );
 
@@ -85,13 +88,25 @@ export function buildMcpServer(ctx: ToolContext): McpServer {
     (args) =>
       invoke(ctx, "post_message", () => {
         const posted = ctx.store.postMessage(ctx.botId, args);
-        ctx.notifier?.messagePosted({
-          ...posted,
+        const eventMeta = {
+          seq: posted.seq,
+          message_id: posted.message_id,
+          thread_id: posted.thread_id,
           from: ctx.botId,
           to: args.to.trim(),
           subject: args.subject?.trim() || null,
-        });
-        return { result: posted, messageIds: [posted.message_id] };
+          created_at: posted.created_at,
+        };
+        ctx.events?.publish(eventMeta);
+        ctx.notifier?.messagePosted(eventMeta);
+        return {
+          result: {
+            message_id: posted.message_id,
+            thread_id: posted.thread_id,
+            created_at: posted.created_at,
+          },
+          messageIds: [posted.message_id],
+        };
       }),
   );
 
@@ -150,6 +165,45 @@ export function buildMcpServer(ctx: ToolContext): McpServer {
         const acked = ctx.store.ack(ctx.botId, args.message_ids);
         return { result: acked, messageIds: acked.acked };
       }),
+  );
+
+  server.registerTool(
+    "get_webhook",
+    {
+      title: "Get webhook configuration",
+      description:
+        "Returns your own push notification webhook configuration (URL, enabled state, last delivery status). Never returns the secret.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    () =>
+      invoke(ctx, "get_webhook", () => ({
+        result: { ...ctx.store.getWebhookInfo(ctx.botId) },
+        messageIds: [],
+      })),
+  );
+
+  server.registerTool(
+    "set_webhook",
+    {
+      title: "Set webhook configuration",
+      description:
+        "Registers, updates, or clears your own push notification webhook URL. Supports https:// URLs and private LAN/Tailnet http:// URLs. Pass url: null to remove.",
+      inputSchema: {
+        url: z.string().nullable().describe("Webhook URL to receive metadata-only pings, or null to clear"),
+        secret: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Optional shared secret used for Bearer/X-Automation-Key and HMAC-SHA256 signing; omit to keep existing, null to clear"),
+        enabled: z.boolean().optional().describe("Enable or pause webhook deliveries (default true when url is set)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    (args) =>
+      invoke(ctx, "set_webhook", () => ({
+        result: { ...ctx.store.setWebhook(ctx.botId, args) },
+        messageIds: [],
+      })),
   );
 
   return server;

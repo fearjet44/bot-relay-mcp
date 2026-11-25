@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS threads (
@@ -59,6 +59,50 @@ BEFORE DELETE ON audit_log
 BEGIN
   SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+
+CREATE TABLE IF NOT EXISTS bots (
+  id                  TEXT PRIMARY KEY,
+  display_name        TEXT,
+  created_at          TEXT NOT NULL,
+  last_seen_at        TEXT,
+  revoked_at          TEXT,
+  webhook_url         TEXT,
+  webhook_secret_enc  TEXT,
+  webhook_enabled     INTEGER NOT NULL DEFAULT 1,
+  webhook_last_status TEXT,
+  webhook_last_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bot_tokens (
+  id           TEXT PRIMARY KEY,
+  bot_id       TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  token_hash   TEXT NOT NULL UNIQUE,
+  label        TEXT,
+  created_at   TEXT NOT NULL,
+  revoked_at   TEXT,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS bot_tokens_bot ON bot_tokens(bot_id, revoked_at);
+
+CREATE TABLE IF NOT EXISTS invite_codes (
+  id           TEXT PRIMARY KEY,
+  code_hash    TEXT NOT NULL UNIQUE,
+  code_prefix  TEXT NOT NULL,
+  bot_id       TEXT,
+  label        TEXT,
+  max_uses     INTEGER NOT NULL DEFAULT 1,
+  uses         INTEGER NOT NULL DEFAULT 0,
+  expires_at   TEXT,
+  created_at   TEXT NOT NULL,
+  revoked_at   TEXT,
+  last_used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 export function openDatabase(path: string): DatabaseSync {

@@ -18,9 +18,11 @@ describe("config", () => {
     assert.equal(config.maxBodyBytes, 32 * 1024);
   });
 
-  it("rejects missing, malformed and duplicate BOTS entries", () => {
+  it("allows BOTS to be omitted for zero-config DB mode, and rejects malformed or duplicate entries", () => {
     const h = sha256("x").toString("hex");
-    assert.throws(() => parseBots(undefined), ConfigError);
+    assert.deepEqual(parseBots(undefined), []);
+    assert.deepEqual(parseBots(""), []);
+    assert.throws(() => parseBots(","), ConfigError);
     assert.throws(() => parseBots("chief-of-staff"), ConfigError);
     assert.throws(() => parseBots("chief-of-staff:nothex"), ConfigError);
     assert.throws(() => parseBots(`Bad_Id:${h}`), ConfigError);
