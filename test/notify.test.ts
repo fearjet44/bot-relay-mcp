@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ConfigError, loadConfig, notifyEnvSuffix } from "../src/config.ts";
-import { Notifier, type NotifierOptions } from "../src/notify.ts";
+import { Notifier, signWebhookPayload, type NotifierOptions } from "../src/notify.ts";
+import { validateWebhookUrl, WebhookUrlError } from "../src/webhook-url.ts";
 import { bearer, connectClient, payload, startServer, testEnv, type ServerHarness } from "./helpers.ts";
 
 const KEY = "notify-test-key-3f9a1c";
@@ -125,6 +126,11 @@ describe("push notifications", () => {
       const { headers, body } = rx.received[0]!;
       assert.equal(headers.authorization, `Bearer ${KEY}`);
       assert.equal(headers["x-automation-key"], KEY);
+      assert.equal(headers["x-relay-event"], "relay.message");
+      assert.ok(typeof headers["x-relay-delivery"] === "string" && headers["x-relay-delivery"].startsWith("del_"));
+      const ts = String(headers["x-relay-timestamp"] ?? "");
+      assert.match(ts, /^\d+$/);
+      assert.equal(headers["x-relay-signature-256"], signWebhookPayload(KEY, ts, JSON.stringify(body)));
       assert.match(headers["content-type"] ?? "", /^application\/json/);
       assert.deepEqual(body, {
         event: "relay.message",
@@ -271,11 +277,56 @@ describe("push notifications", () => {
       assert.equal(t.notifyAudit().length, 1);
       t.s.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
       for (const file of readdirSync(t.s.dir)) {
+        if (file === ".relay.key") continue;
         assert.ok(!readFileSync(join(t.s.dir, file)).toString("latin1").includes(KEY), `key found in ${file}`);
       }
     } finally {
       await t.close();
       await rx.close();
     }
+  });
+});
+
+describe("webhook URL policy (LAN / Tailnet / SSRF guards)", () => {
+  it("allows LAN, Tailnet, and Docker single-label http:// URLs under default 'private' policy", () => {
+    const allowed = [
+      "https://api2.cursor.sh/automations/webhook/abc",
+      "http://192.168.1.50:9090/hook",
+      "http://10.0.0.12:8080/wake",
+      "http://172.20.0.5:3000/hook",
+      "http://100.64.12.34:9090/hook",
+      "http://mac-mini.tail1234.ts.net:9090/hook",
+      "http://homelab.local:8080/hook",
+      "http://bot-worker:9000/hook",
+      "http://host.docker.internal:9000/hook",
+      "http://[fd7a:115c:a1e0::1]:9090/hook",
+    ];
+    for (const url of allowed) {
+      assert.equal(validateWebhookUrl(url), url);
+    }
+  });
+
+  it("blocks public http://, cloud metadata endpoints, embedded credentials, and loopback by default", () => {
+    const blocked = [
+      "http://example.com/hook",
+      "http://169.254.169.254/latest/meta-data/",
+      "https://169.254.169.254/latest/meta-data/",
+      "http://[fd00:ec2::254]/latest/meta-data/",
+      "http://metadata.google.internal/computeMetadata/v1/",
+      "http://127.0.0.1:9000/hook",
+      "http://[::1]:9000/hook",
+      "http://[::ffff:127.0.0.1]:9000/hook",
+      "http://localhost:9000/hook",
+      "https://user:pass@example.com/hook",
+      "ftp://192.168.1.50/hook",
+    ];
+    for (const url of blocked) {
+      assert.throws(() => validateWebhookUrl(url), WebhookUrlError, url);
+    }
+    // Loopback succeeds only when explicitly enabled
+    assert.equal(
+      validateWebhookUrl("http://127.0.0.1:9000/hook", { allowHttp: "private", allowLoopback: true }),
+      "http://127.0.0.1:9000/hook",
+    );
   });
 });

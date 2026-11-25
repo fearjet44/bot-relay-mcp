@@ -43,9 +43,12 @@ describe("end-to-end over Streamable HTTP with the MCP SDK client", () => {
     await s.close();
   });
 
-  it("exposes the five tools, none of which accepts a sender", async () => {
+  it("exposes the seven tools, none of which accepts a sender", async () => {
     const { tools } = await cos.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["ack", "list_peers", "list_threads", "post_message", "read_messages"]);
+    assert.deepEqual(
+      tools.map((t) => t.name).sort(),
+      ["ack", "get_webhook", "list_peers", "list_threads", "post_message", "read_messages", "set_webhook"],
+    );
     for (const tool of tools) {
       const props = Object.keys((tool.inputSchema as { properties?: object }).properties ?? {});
       assert.ok(!props.includes("from"), `${tool.name} must not accept "from"`);

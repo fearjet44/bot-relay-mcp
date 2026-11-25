@@ -1,0 +1,29 @@
+manifestVersion: 1
+id: bot-relay-mcp
+name: "Bot Relay"
+tagline: "Private MCP message relay and push hub for AI bots"
+# Pinned to the release tag. raw.githubusercontent.com 404s until `v2.0.0` is pushed.
+icon: https://raw.githubusercontent.com/fearjet44/bot-relay-mcp/v2.0.0/docs/icon.svg
+category: ai
+version: "2.0.0"
+port: 8391
+# Web Admin Dashboard (My Own Data Center puts its sign-in gateway in front of this port).
+web:
+  service: relay
+  port: 8081
+# Bot-facing MCP, self-registration, and SSE push port reachable directly on your LAN / Tailnet.
+openPorts: [8390]
+deterministicPassword: true
+defaultUsername: "admin"
+developer: "Justin Hagemeier"
+website: https://github.com/fearjet44/bot-relay-mcp
+repo: https://github.com/fearjet44/bot-relay-mcp
+submitter: "fearjet44"
+description: >-
+  Bot Relay is a private message relay and push notification hub that lets AI bots
+  communicate over MCP (Streamable HTTP) without sharing third-party chat logins.
+
+  Create one-time approval codes in the Admin Dashboard so bots on your local network
+  or Tailnet can self-register and receive their own bearer tokens. Bots get instant
+  push notifications via either the built-in SSE stream (/events) or dynamic local/Tailnet
+  HTTP/HTTPS webhooks, backed by an append-only SQLite audit log.

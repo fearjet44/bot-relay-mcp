@@ -1,270 +1,121 @@
-# Deploying bot-relay on Omarchy Server
+# Deploying Bot Relay
 
-The relay runs as a custom app: two containers under **rootless Podman** in one compose project.
+Bot Relay supports three deployment styles using the exact same container image:
 
-- **`relay`**: the MCP server. It listens on `8080` on the compose network only and publishes
-  no host ports. It uses a read-only root filesystem, drops all capabilities and sets
-  `no-new-privileges`. Its only writable mount is the named volume `relay-data` at `/data`
-  (with `:Z` for SELinux).
-- **`cloudflared`**: the Cloudflare Tunnel connector (`tunnel run`). It makes outbound-only
-  connections to Cloudflare and forwards `https://relay.justinhagemeier.com` to `http://relay:8080`.
-
-Nothing else is exposed. The host needs no inbound firewall rules.
-
-> **Hard limits on Omarchy**
-> - **Never restart `omarchyd` from within Omarchy.** Nothing in this guide requires it. Only
->   the relay's own containers are started, stopped or rebuilt.
-> - **Never print secrets.** Don't print tokens or the keys in Omarchy's `keys.json`, and don't
->   `cat` `.env`, `echo $TUNNEL_TOKEN`, paste secrets into chats, or include them in bug
->   reports. To check whether a value is set, use `grep -c '^TUNNEL_TOKEN=.\+' .env`.
-
-Contents:
-
-1. [Cloudflare setup](#1-cloudflare-setup)
-2. [Install on the server](#2-install-on-the-server)
-3. [Verify](#3-verify)
-4. [Operations](#4-operations): logs, upgrades, backups, restore, token rotation, push notifications
-5. [Running without the cloudflared sidecar](#5-running-without-the-cloudflared-sidecar)
+1. **[My Own Data Center (Omarchy Server)](#1-my-own-data-center-omarchy-server)** — 1-click app store install with automatic MODC sign-in on the Admin UI and direct LAN/Tailnet access for bots.
+2. **[Standard Docker / Podman Compose](#2-standard-docker--podman-compose)** — zero-config standalone deployment on any Linux, macOS, or homelab machine.
+3. **[Optional Cloudflare Tunnel + Access](#3-optional-cloudflare-tunnel--access)** — for internet-hosted bots (such as cloud-hosted Grok/Cursor automations) without opening router ports.
 
 ---
 
-## 1. Cloudflare setup
+## 1. My Own Data Center (Omarchy Server)
 
-All steps are in the Cloudflare **Zero Trust** dashboard, using the account that hosts DNS for
-`justinhagemeier.com`.
+The server project is [My Own Data Center](https://github.com/MyOwnDataCenter/Server). This repository includes ready-to-use manifests under [`modc/bot-relay-mcp/`](../modc/bot-relay-mcp/):
 
-### 1a. Tunnel + public hostname
+- **Admin UI (`port: 8391` → container `8081`):** Declared as `web: { service: relay, port: 8081 }`. My Own Data Center binds it privately on `127.0.0.1`, puts its own sign-in gateway in front of it, and forwards a verified `x-omarchy-gateway` header (`${APP_GATEWAY_KEY}`). Opening **Bot Relay** from your MODC desktop or phone signs you straight into the Admin Dashboard with no extra login prompt.
+- **Admin password:** `ADMIN_PASSWORD` is set to `${APP_PASSWORD}`. The listing sets `deterministicPassword: true` and `defaultUsername: "admin"`, so the password shown on the app's page is the Admin Dashboard password, with username `admin`. The gateway sign-in does not ask for it. The password matters when that gateway is bypassed: starting this compose file yourself publishes port `8391`, and the Admin API accepts the password as a bearer token.
+- **Bot API (`openPorts: [8390]` → container `8080`):** Opened directly on your LAN and Tailnet so bots can reach `/mcp`, `/register`, and `/events` using Bearer tokens without hitting MODC's browser login gate.
+- **Addresses returned to bots:** `PUBLIC_URL` is `http://${SERVER_IP:-localhost}:8390`. My Own Data Center sets `SERVER_IP` to the host's first non-bridge IPv4 address. It skips docker, podman, cni, veth, and br- interfaces, and addresses in `10.88.`, `10.89.`, and `172.17.`. It does not skip Tailscale, and it uses the host's interface order, so a machine with several addresses may advertise a LAN address or a Tailscale address. `POST /register` builds `mcp_url` and `events_url` from that base. The `localhost` fallback applies only when this compose file is started without My Own Data Center's environment. My Own Data Center itself uses `127.0.0.1` when the host has no other IPv4 address.
+- **Persistent storage:** Stored under `${APP_DATA_DIR}/data`, which My Own Data Center backs up with the app. The container runs as `user: "1000:1000"`, the same uid as the image's `node` user. On install, My Own Data Center creates that folder and runs `podman unshare chown -R 1000:1000` on it before the first start, so the container user can create `relay.db` and `.relay.key`. Keep the bind mount. A named volume would sit outside `${APP_DATA_DIR}` and would not be part of that backup. If you run this compose file yourself, create the data directory first. With rootless Podman, `podman unshare chown -R 1000:1000` that directory. With rootful Docker, `sudo chown -R 1000:1000` it.
+- **Encrypted secrets:** Wired to `${APP_SEED}` so DB-stored webhook secrets are AES-256-GCM encrypted at rest.
+- **Hardening:** The compose file sets `read_only`, a `/tmp` tmpfs, `cap_drop: [ALL]`, `no-new-privileges`, and the same healthcheck as the root file (`node scripts/healthcheck.mjs`, which checks `PORT` and `ADMIN_PORT`). My Own Data Center's store check treats `no-new-privileges` as tighter confinement, not as extra access, and it passes the other settings through.
 
-1. **Networks → Tunnels → Create a tunnel**, then choose **Cloudflared**. Name it `bot-relay`.
-2. On the "install connector" screen, copy **only the token**: the long string after
-   `--token` / `tunnel run` in the displayed command. It goes into `.env` as `TUNNEL_TOKEN`.
-   Don't run the displayed install command, because the compose sidecar runs the connector.
-3. Add a public hostname. Depending on the dashboard version, this is under **Public Hostname**
-   or **Published application routes**:
-   - Subdomain `relay`, domain `justinhagemeier.com`, path empty.
-   - Service type `HTTP`, URL `relay:8080`.
+### Testing or submitting to the community store
 
-   Cloudflare creates the proxied `relay.justinhagemeier.com` CNAME to the tunnel.
-4. Don't add other hostnames or routes to this tunnel.
+The catalog My Own Data Center ships with is [MyOwnDataCenter/app-store](https://github.com/MyOwnDataCenter/app-store). New apps are submitted to the community store, [MyOwnDataCenter/Modc-app-store](https://github.com/MyOwnDataCenter/Modc-app-store). `https://github.com/TouchWorkStation/Modc-app-store` redirects there. Do not open a submission against the built-in catalog.
 
-### 1b. One service token per bot
+Submit only after the `v2.0.0` tag is on GitHub and the GHCR package is public. The listing pins both of these, and neither exists before that:
 
-**Access → Service auth → Service Tokens → Create Service Token**, twice:
+- image `ghcr.io/fearjet44/bot-relay-mcp:2.0.0`
+- icon `https://raw.githubusercontent.com/fearjet44/bot-relay-mcp/v2.0.0/docs/icon.svg`
 
-| Name | Used by |
-| --- | --- |
-| `relay-chief-of-staff` | the `chief-of-staff` connector |
-| `relay-abjets-company` | the `abjets-company` connector |
+1. Merge the release branch, then publish the tag (`git tag v2.0.0 && git push origin v2.0.0`) so `.github/workflows/release.yml` pushes the multi-arch image.
+2. Set the `bot-relay-mcp` package on GitHub Packages (`ghcr.io/fearjet44/bot-relay-mcp`) to **Public**.
+3. Submit `modc/bot-relay-mcp/omarchy-app.yml` and `modc/bot-relay-mcp/docker-compose.yml` to [Modc-app-store](https://github.com/MyOwnDataCenter/Modc-app-store), or push the contents of `modc/` to a standalone store repository and add it in MODC under **App Store → Stores → Add by link**.
 
-Pick a duration, such as 1 year, and add a calendar reminder to rotate before it expires. Each
-token has a **Client ID**, which ends in `.access`, and a **Client Secret**. The secret is shown
-**only once**. Enter it directly into the bot's connector config; don't store it elsewhere.
+---
 
-### 1c. Access application
+## 2. Standard Docker / Podman Compose
 
-**Access → Applications → Add an application → Self-hosted**:
-
-1. Application name `bot-relay`. Application domain: `relay.justinhagemeier.com`, path empty,
-   so the whole hostname is covered, including `/mcp`, `/log` and `/healthz`.
-2. **Policies**:
-   - **`bots` policy**: Action **Service Auth**. Include → **Service Token** →
-     `relay-chief-of-staff` and `relay-abjets-company`.
-   - Optional, only if you want to open `/log` in a browser: a **`justin` policy** with Action
-     **Allow**, Include → **Emails** → Justin's address. Without it, `/log` is reachable only
-     with service-token headers plus the viewer token.
-3. Leave the other settings at their defaults. Don't add a Bypass policy.
-
-Each request then needs to pass two independent checks:
-
-| Layer | Header(s) | Checked by |
-| --- | --- | --- |
-| Cloudflare Access | `CF-Access-Client-Id`, `CF-Access-Client-Secret` | Cloudflare edge. Requests without them never reach the server |
-| Relay | `Authorization: Bearer <bot relay token>` | the relay, which maps the token hash to a bot id |
-
-[CONNECTORS.md](CONNECTORS.md) lists the exact headers for each bot.
-
-## 2. Install on the server
-
-These are generic steps for an Omarchy Server custom app. Run them as the unprivileged user
-that owns the app, **not root**. Podman stays rootless.
+No `.env` file or third-party account is required:
 
 ```bash
-# 1. Clone (private repo; use whatever Git credential Omarchy already has configured)
 git clone https://github.com/fearjet44/bot-relay-mcp.git
 cd bot-relay-mcp
-
-# 2. Build the image
-podman compose build            # or: podman-compose build
-
-# 3. Generate tokens. Each TOKEN is printed once: put it straight into that
-#    bot's connector config (see CONNECTORS.md). Keep only the hashes here.
-podman run --rm localhost/bot-relay-mcp:latest node scripts/hash-token.mjs chief-of-staff
-podman run --rm localhost/bot-relay-mcp:latest node scripts/hash-token.mjs abjets-company
-podman run --rm localhost/bot-relay-mcp:latest node scripts/hash-token.mjs viewer
-
-# 4. Create .env from the template and fill it in with an editor, not with echo
-cp .env.example .env
-chmod 600 .env
-${EDITOR:-nano} .env
-#   PUBLIC_HOSTNAME=relay.justinhagemeier.com
-#   BOTS=chief-of-staff:<sha256>,abjets-company:<sha256>
-#   VIEWER_TOKEN_SHA256=<sha256>        (or leave empty to disable /log)
-#   TUNNEL_TOKEN=<token from step 1a>
-
-# 5. Start
-podman compose up -d
+docker compose up -d --build   # or: podman compose up -d --build
+docker compose logs relay       # copy the one-time First-run Admin Password
 ```
 
-Notes:
+Open `http://<server-ip>:8391` in your browser and sign in with the printed password (or set
+`ADMIN_PASSWORD` / `ADMIN_TOKEN_SHA256` in `.env` beforehand).
 
-- `podman compose` delegates to `podman-compose` or `docker-compose`, whichever is installed.
-  Both work with this file, which has been tested with podman-compose 1.0.6 on Podman 4.9 in
-  rootless mode.
-- Both containers read `.env` through `env_file`, which podman-compose passes as a file rather
-  than on the command line. podman-compose echoes every `podman run` command it executes, but
-  those commands contain only the `BOTS`/viewer **hashes**, never the tunnel token or the
-  `NOTIFY_KEY_*` values. The relay's `environment:` blanks `TUNNEL_TOKEN`, so it reaches only
-  `cloudflared`.
-- To start the stack after a reboot, rootless containers with `restart: unless-stopped` need
-  Podman's restart service and user lingering:
-  `systemctl --user enable podman-restart.service` and `loginctl enable-linger "$USER"`.
-  Skip this if Omarchy already manages app startup.
-
-## 3. Verify
+If you want `POST /register` and UI snippets to advertise your server's LAN IP or Tailscale
+hostname automatically, set `PUBLIC_URL` in `.env`:
 
 ```bash
-podman compose ps                                   # relay should become "healthy"
-podman compose logs relay | tail                    # "bot-relay listening on 0.0.0.0:8080 ..."
-podman compose logs cloudflared | tail              # "Registered tunnel connection ..." (x4)
-
-# From anywhere: Access must block requests without the service-token headers
-curl -s -o /dev/null -w '%{http_code}\n' https://relay.justinhagemeier.com/healthz
-#   -> 302 or 403 (Access login or denial), never 200
-
-# Health through the full path, without typing secrets on the command line:
-# put the service-token headers in a file only you can read, then delete it.
-umask 077; ${EDITOR:-nano} /tmp/cf-headers.txt
-#   CF-Access-Client-Id: <id>.access
-#   CF-Access-Client-Secret: <secret>
-curl -s -H @/tmp/cf-headers.txt https://relay.justinhagemeier.com/healthz   # {"status":"ok"}
-shred -u /tmp/cf-headers.txt
+PUBLIC_URL=http://my-server.tail1234.ts.net:8390
 ```
 
-There is no host port to curl directly, which is intentional. To check the relay from inside
-the stack, run `podman compose exec relay node scripts/healthcheck.mjs && echo ok`.
-
-The best end-to-end test is from the bots themselves. Have `chief-of-staff` call `list_peers`,
-then `post_message` to `abjets-company`, and have `abjets-company` call `read_messages`.
-
-## 4. Operations
-
-### Logs
+### Creating an invite code from the CLI (headless)
 
 ```bash
-podman compose logs -f relay        # one line per request: method, path, status, ms, bot id
-podman compose logs -f cloudflared
+docker compose exec relay node --disable-warning=ExperimentalWarning \
+  scripts/create-invite.mjs --bot mac-mini --ttl 1h --uses 1
 ```
 
-The relay never logs headers, tokens or message bodies. The audit trail lives in SQLite, and
-`/log` shows it.
+`--ttl` defaults to `1h`. A duration is `<n>s`, `<n>m`, `<n>h`, or `<n>d`, from 60 seconds through 365 days (`90s`, `15m`, `1h`, `24h`, `7d`), or `never`. `--ttl 30s` and `--ttl 400d` exit 1 with that rule on stderr and do not write a code. `create-invite --help` prints the same window.
 
-### Upgrade
+Or set `BOOTSTRAP_INVITE_CODE` in `.env`. On startup the relay inserts that code once, if it is not already in the database. By default the seeded row allows **1** registration, expires after **24h**, and is not locked to a `bot_id`. Override with `BOOTSTRAP_INVITE_USES` (`1`–`100`), `BOOTSTRAP_INVITE_TTL` (`60s`–`365d` as `<n>s`/`<n>m`/`<n>h`/`<n>d`, or `never`), and `BOOTSTRAP_INVITE_BOT` (optional locked `bot_id`). A restart does not reset its use count or extend its expiry. Anyone who can read the env value can use the code while it is active.
+
+### Operations
+
+#### Backups
+
+SQLite runs in WAL mode. Always take consistent snapshots with `scripts/backup.mjs` (`VACUUM INTO`):
 
 ```bash
-cd bot-relay-mcp
+docker compose exec relay node --disable-warning=ExperimentalWarning scripts/backup.mjs
+# -> /data/backups/relay-2026-11-25T12-00-00-000Z.db
+```
+
+Backups contain message bodies (and encrypted webhook secrets, whose key lives separately in
+`/data/.relay.key` or `ENCRYPTION_KEY`). Store backups securely.
+
+#### Upgrades
+
+```bash
 git pull
-podman compose build
-podman compose down        # stops and removes the containers; the relay-data volume is kept
-podman compose up -d
+docker compose up -d --build
 ```
 
-Use `down` then `up` rather than relying on `up -d` alone: podman-compose 1.0.x doesn't recreate
-containers when only the image changed. **Never** run `podman compose down -v` or
-`podman volume rm`, because that deletes the database. The schema is created and upgraded on
-startup.
+`pull_policy: build` in the root compose file makes a plain `up` rebuild from this checkout on Compose implementations that honor it. `--build` is the command that also works when an implementation ignores `pull_policy`. `docker compose pull` fetches `ghcr.io/fearjet44/bot-relay-mcp:latest`, which is not published until the first release, and the next `up` still rebuilds while `pull_policy` is `build`.
 
-### Backup
+Never run `docker compose down -v`, which deletes the `relay-data` volume. SQLite migrations run
+automatically on startup.
 
-The database runs in WAL mode, so don't copy `relay.db` alone while the relay is running. Use
-the backup script, which writes a consistent, compacted snapshot with SQLite `VACUUM INTO`:
+#### Static `BOTS` env vars (optional / legacy)
+
+You can still pre-provision static bots via `BOTS=bot-a:<sha256>,bot-b:<sha256>` (generated with
+`npm run hash-token -- <bot-id>`). Static env bots coexist cleanly with dynamically self-registered
+DB bots.
+
+---
+
+## 3. Optional Cloudflare Tunnel + Access
+
+If some bots run in external cloud environments that cannot join your LAN or Tailnet, you can
+optionally expose the Bot API (`http://relay:8080`) via Cloudflare Tunnel + Cloudflare Access:
+
+1. Create a Cloudflare Tunnel and route your public hostname (e.g., `relay.example.com`) to
+   `http://relay:8080` (do **not** route the Admin port `8081` publicly).
+2. Protect the hostname with a Cloudflare Access **Self-Hosted** application and **Service Auth**
+   policy using per-bot Service Tokens (`CF-Access-Client-Id` / `CF-Access-Client-Secret`).
+3. Set `TUNNEL_TOKEN` and `PUBLIC_URL=https://relay.example.com` in `.env`, then start with the
+   `cloudflare` profile:
 
 ```bash
-podman compose exec relay node --disable-warning=ExperimentalWarning scripts/backup.mjs
-#   -> /data/backups/relay-2026-11-23T20-47-59-295Z.db
-podman ps --format '{{.Names}}' | grep relay        # e.g. bot-relay_relay_1 (or bot-relay-relay-1)
-podman cp bot-relay_relay_1:/data/backups ./backups
+docker compose --profile cloudflare up -d --build
 ```
 
-Alternatively, stop the stack and copy the whole volume:
-`podman compose down && podman volume export bot-relay_relay-data -o relay-data.tar && podman compose up -d`.
-
-Backups contain every message body. Store them like any other secret, and prune old ones from
-`/data/backups`.
-
-### Restore
-
-```bash
-podman compose down
-podman run --rm -v bot-relay_relay-data:/data:Z -v "$PWD/backups/relay-XYZ.db:/restore.db:ro,Z" \
-  localhost/bot-relay-mcp:latest sh -c 'rm -f /data/relay.db-wal /data/relay.db-shm && cp /restore.db /data/relay.db'
-podman compose up -d
-```
-
-### Rotating a bot token without downtime
-
-1. `podman run --rm localhost/bot-relay-mcp:latest node scripts/hash-token.mjs chief-of-staff`
-2. In `.env`, **add** the new entry next to the old one:
-   `BOTS=chief-of-staff:<old>,chief-of-staff:<new>,abjets-company:<...>`. Then run
-   `podman compose down && podman compose up -d`.
-3. Put the new token in the connector's `Authorization` header.
-4. Remove the old hash from `BOTS` and restart the same way.
-
-To rotate Cloudflare service tokens, use **Access → Service auth → Service Tokens → Refresh**
-(or create a new token, add it to the policy, switch the connector, then delete the old one).
-For the tunnel token, see Cloudflare's tunnel token rotation in the tunnel's settings, then
-update `TUNNEL_TOKEN` and restart `cloudflared`.
-
-### Push notifications
-
-By default the bots poll `read_messages`. To wake a bot the moment mail lands for it, give the
-relay a webhook for that bot in `.env`, where `<BOT>` is the bot id uppercased with dashes as
-underscores:
-
-```bash
-NOTIFY_URL_CHIEF_OF_STAFF=https://api2.cursor.sh/automations/webhook/<id>
-NOTIFY_KEY_CHIEF_OF_STAFF=<webhook key>
-NOTIFY_URL_ABJETS_COMPANY=https://api2.cursor.sh/automations/webhook/<id>
-NOTIFY_KEY_ABJETS_COMPANY=<webhook key>
-```
-
-Then run `podman compose down && podman compose up -d`. The startup line shows which bots have
-push enabled, e.g. `notify=chief-of-staff`. The relay refuses to start (`config error: ...`) on
-a non-https URL, a URL without a key or the reverse, or a `NOTIFY_*` name that matches no bot in
-`BOTS`. Errors name the variable, never its value. Check that a key is set with
-`grep -c '^NOTIFY_KEY_CHIEF_OF_STAFF=.\+' .env`, not by printing it.
-
-Each delivery shows up in the relay log (`notify bot=... delivered http_200 attempts=1`) and in
-`/log` as tool `notify` with status `delivered` or `failed`. The ping format is in
-[CONNECTORS.md](CONNECTORS.md#push-notifications). To rotate a key, update it in `.env` and in
-the receiver, then restart the relay.
-
-### Revoking a bot immediately
-
-Remove its entry from `BOTS` and restart the relay. Also remove or revoke its service token in
-Cloudflare, which blocks it at the edge.
-
-## 5. Running without the cloudflared sidecar
-
-If Omarchy already runs and manages `cloudflared` for the host, run without the sidecar:
-
-1. Delete the `cloudflared:` service from `docker-compose.yml`. `TUNNEL_TOKEN` is then no longer
-   needed.
-2. Point the existing tunnel's public hostname for `relay.justinhagemeier.com` at the relay
-   container. That cloudflared has to reach the relay **without** publishing a port to the
-   outside world:
-   - If the host's cloudflared runs as a container, attach it to the `bot-relay_default`
-     network and use `http://relay:8080`.
-   - If it runs directly on the host, add `ports: ["127.0.0.1:8080:8080"]` to `relay` so the
-     port binds to loopback only, and use `http://127.0.0.1:8080`.
-3. The Cloudflare Access application and the headers in [CONNECTORS.md](CONNECTORS.md) stay
-   exactly the same.
+To bind the local host ports to loopback only when using Cloudflare exclusively, override
+`ports:` to `127.0.0.1:8390:8080` and `127.0.0.1:8391:8081`.

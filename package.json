@@ -1,10 +1,10 @@
 {
   "name": "bot-relay-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Bot-to-bot relay MCP server (Streamable HTTP) for Grok Bots; SQLite log, audit, Podman compose + Cloudflare Tunnel",
+  "description": "Self-hosted MCP message relay and real-time push hub (SSE + LAN/Tailnet webhooks) for AI bots with invite-code self-registration, Web Admin UI, Docker and My Own Data Center support",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.18"
   },
@@ -14,7 +14,8 @@
     "start": "node --disable-warning=ExperimentalWarning dist/index.js",
     "dev": "node --disable-warning=ExperimentalWarning src/index.ts",
     "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec test/*.test.ts",
-    "hash-token": "node scripts/hash-token.mjs"
+    "hash-token": "node scripts/hash-token.mjs",
+    "create-invite": "node --disable-warning=ExperimentalWarning scripts/create-invite.mjs"
   },
   "repository": {
     "type": "git",

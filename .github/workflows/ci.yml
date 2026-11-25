@@ -28,11 +28,41 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image with Podman
         run: podman build -t localhost/bot-relay-mcp:ci .
-      - name: Smoke-test the image
+      - name: Smoke-test zero-config self-registration and split-port admin
+        run: |
+          set -euo pipefail
+          podman run -d --name relay-v2 --read-only --tmpfs /tmp --cap-drop ALL \
+            -e DB_PATH=/tmp/relay.db \
+            -e ADMIN_PORT=8081 \
+            -e ADMIN_PASSWORD=ci-admin-pass \
+            -e BOOTSTRAP_INVITE_CODE=join_ci_bootstrap_code \
+            -p 127.0.0.1:18390:8080 \
+            -p 127.0.0.1:18391:8081 \
+            localhost/bot-relay-mcp:ci
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18390/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18391/healthz | grep -q '"ok"'
+          # Bot port must not expose admin API
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18390/api/admin/overview)" = 404
+          # Admin API works with ADMIN_PASSWORD
+          curl -fsS -H 'Authorization: Bearer ci-admin-pass' http://127.0.0.1:18391/api/admin/overview | grep -q '"version":"2.0.0"'
+          # Bot self-registers using bootstrap invite code
+          reg=$(curl -fsS -X POST http://127.0.0.1:18390/register \
+            -H 'Content-Type: application/json' \
+            -d '{"code":"join_ci_bootstrap_code","bot_id":"ci-bot"}')
+          tok=$(printf '%s' "$reg" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).token)')
+          test -n "$tok"
+          # Authenticated MCP call succeeds
+          curl -fsS -X POST http://127.0.0.1:18390/mcp \
+            -H "Authorization: Bearer ${tok}" -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_peers","arguments":{}}}' \
+            | grep -q '"self":"ci-bot"'
+          podman rm -f relay-v2
+      - name: Smoke-test legacy static BOTS mode
         run: |
           set -euo pipefail
           hash=$(printf 'ci-token' | sha256sum | cut -d' ' -f1)
-          podman run -d --name relay --read-only --tmpfs /tmp --cap-drop ALL \
+          podman run -d --name relay-legacy --read-only --tmpfs /tmp --cap-drop ALL \
             -e BOTS="ci-bot:${hash},other-bot:$(printf 'other' | sha256sum | cut -d' ' -f1)" \
             -e DB_PATH=/tmp/relay.db -p 127.0.0.1:18080:8080 localhost/bot-relay-mcp:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18080/healthz && break; sleep 1; done
@@ -44,4 +74,6 @@ jobs:
             | grep -q '"self":"ci-bot"'
       - name: Container logs
         if: always()
-        run: podman logs relay || true
+        run: |
+          podman logs relay-v2 2>/dev/null || true
+          podman logs relay-legacy 2>/dev/null || true
