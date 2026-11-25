@@ -12,7 +12,13 @@ import { DatabaseSync } from "node:sqlite";
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
   console.log(
-    "usage: create-invite [--bot <bot-id>] [--uses <1-100>] [--ttl <15m|1h|24h|7d|never>] [--label <text>] [--db <path>]",
+    [
+      "usage: create-invite [--bot <bot-id>] [--uses <1-100>] [--ttl <duration|never>] [--label <text>] [--db <path>]",
+      "",
+      "Creates an approval code in SQLite and prints it once.",
+      "--ttl defaults to 1h. A duration is <n>s, <n>m, <n>h, or <n>d,",
+      "from 60 seconds through 365 days. Examples: 90s, 15m, 1h, 24h, 7d, never.",
+    ].join("\n"),
   );
   process.exit(0);
 }
@@ -23,17 +29,27 @@ function getArg(flag) {
   return args[idx + 1];
 }
 
+// Same window as store.createInviteCode: 60 seconds through 365 days, or never.
+const MIN_TTL_SECONDS = 60;
+const MAX_TTL_SECONDS = 365 * 86400;
+
 function parseTtlSeconds(raw) {
   if (!raw || raw === "1h") return 3600;
   if (raw === "never") return null;
   const m = raw.match(/^(\d+)([smhd])$/i);
   if (!m) {
-    console.error(`invalid --ttl "${raw}" (examples: 15m, 1h, 24h, 7d, never)`);
+    console.error(`invalid --ttl "${raw}" (examples: 90s, 15m, 1h, 24h, 7d, never)`);
+    console.error("expiry must be between 60 seconds and 365 days, or never");
     process.exit(1);
   }
   const n = Number(m[1]);
   const mult = { s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase()];
-  return n * mult;
+  const seconds = n * mult;
+  if (!Number.isSafeInteger(seconds) || seconds < MIN_TTL_SECONDS || seconds > MAX_TTL_SECONDS) {
+    console.error(`invalid --ttl "${raw}": expiry must be between 60 seconds and 365 days, or never`);
+    process.exit(1);
+  }
+  return seconds;
 }
 
 const botId = getArg("--bot")?.trim() || null;

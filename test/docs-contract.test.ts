@@ -692,6 +692,51 @@ describe("docs contract: CLI and process", () => {
       );
     }
   });
+
+  it("create-invite rejects TTLs outside 60 seconds–365 days with exit 1 and no stack trace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bot-relay-ttl-"));
+    try {
+      for (const ttl of ["30s", "59s", "366d", "400d"]) {
+        const dbPath = join(dir, ttl, "relay.db");
+        let err: unknown;
+        try {
+          execFileSync(
+            process.execPath,
+            ["--disable-warning=ExperimentalWarning", "scripts/create-invite.mjs", "--db", dbPath, "--ttl", ttl],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+          );
+        } catch (e) {
+          err = e;
+        }
+        assert.ok(err instanceof Error, ttl);
+        const failure = err as Error & { status?: number; stderr?: string };
+        assert.equal(failure.status, 1, ttl);
+        const stderr = String(failure.stderr ?? "");
+        assert.match(stderr, /60 seconds/, stderr);
+        assert.match(stderr, /365 days/, stderr);
+        assert.doesNotMatch(stderr, /\n\s+at /);
+        assert.equal(existsSync(dbPath), false, `${ttl} must not create a database`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create-invite accepts the TTL bounds 60s and 365d", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bot-relay-ttl-ok-"));
+    try {
+      for (const ttl of ["60s", "365d"]) {
+        const out = execFileSync(
+          process.execPath,
+          ["--disable-warning=ExperimentalWarning", "scripts/create-invite.mjs", "--db", join(dir, `${ttl}.db`), "--ttl", ttl],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+        assert.match(out, /^EXPIRES\s+\d{4}-/m, out);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 async function freePort(): Promise<number> {
@@ -781,6 +826,8 @@ describe("docs contract: zero-config boot (src/index.ts)", () => {
       const reg = await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "boot-bot" });
       assert.equal(reg.status, 201);
       regToken = ((await reg.json()) as { token: string }).token;
+      // Current seed: 50 uses, no expiry, any bot id. A second bot is accepted.
+      assert.equal((await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "boot-bot-2" })).status, 201);
     } finally {
       await first.stop();
     }
@@ -803,9 +850,14 @@ describe("docs contract: zero-config boot (src/index.ts)", () => {
     // Restart must not re-seed / reset the bootstrap invite's usage counter.
     const db = new DatabaseSync(env.DB_PATH);
     try {
-      const rows = db.prepare("SELECT uses FROM invite_codes WHERE label LIKE 'bootstrap%'").all() as { uses: number }[];
+      const rows = db.prepare(
+        "SELECT max_uses, expires_at, bot_id, uses FROM invite_codes WHERE label = 'bootstrap (env)'",
+      ).all() as { max_uses: number; expires_at: string | null; bot_id: string | null; uses: number }[];
       assert.equal(rows.length, 1, "bootstrap invite must be seeded exactly once");
-      assert.equal(rows[0]!.uses, 1);
+      assert.equal(rows[0]!.max_uses, 50);
+      assert.equal(rows[0]!.expires_at, null);
+      assert.equal(rows[0]!.bot_id, null);
+      assert.equal(rows[0]!.uses, 2);
     } finally {
       db.close();
     }

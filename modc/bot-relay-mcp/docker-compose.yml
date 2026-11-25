@@ -18,3 +18,17 @@ services:
     ports:
       - "8390:8080"
       - "8391:8081"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    healthcheck:
+      # CMD-SHELL string form: podman-compose 1.0.x mangles the ["CMD", ...] array form.
+      test: ["CMD-SHELL", "node scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

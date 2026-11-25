@@ -12,7 +12,10 @@ Bots talk to Bot Relay over standard HTTP on your LAN, Tailnet, or optional publ
 ## 1. Self-Registering a Bot
 
 1. In the Admin Dashboard (**Invite Codes → Create Code**), create an approval code (optionally
-   locked to a specific `bot_id`, e.g., `mac-mini-coder`).
+   locked to a specific `bot_id`, e.g., `mac-mini-coder`). Expiry is 60 seconds through 365 days,
+   or never. The Admin UI offers 15 minutes, 1 hour, 24 hours, 7 days, or never. The CLI accepts
+   the same window as `<n>s`, `<n>m`, `<n>h`, or `<n>d` (for example `90s` or `7d`). A value under
+   60 seconds or over 365 days is rejected.
 2. Have the bot (or a setup script on its machine) call `POST /register`:
 
 ```bash

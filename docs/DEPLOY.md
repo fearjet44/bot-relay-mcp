@@ -10,18 +10,28 @@ Bot Relay supports three deployment styles using the exact same container image:
 
 ## 1. My Own Data Center (Omarchy Server)
 
-This repository includes ready-to-use My Own Data Center manifests under [`modc/bot-relay-mcp/`](../modc/bot-relay-mcp/):
+The server project is [My Own Data Center](https://github.com/MyOwnDataCenter/Server). This repository includes ready-to-use manifests under [`modc/bot-relay-mcp/`](../modc/bot-relay-mcp/):
 
 - **Admin UI (`port: 8391` → container `8081`):** Declared as `web: { service: relay, port: 8081 }`. My Own Data Center binds it privately on `127.0.0.1`, puts its own sign-in gateway in front of it, and forwards a verified `x-omarchy-gateway` header (`${APP_GATEWAY_KEY}`). Opening **Bot Relay** from your MODC desktop or phone signs you straight into the Admin Dashboard with no extra login prompt.
+- **Admin password:** `ADMIN_PASSWORD` is set to `${APP_PASSWORD}`. The listing sets `deterministicPassword: true` and `defaultUsername: "admin"`, so the password shown on the app's page is the Admin Dashboard password, with username `admin`. The gateway sign-in does not ask for it. The password matters when that gateway is bypassed: starting this compose file yourself publishes port `8391`, and the Admin API accepts the password as a bearer token.
 - **Bot API (`openPorts: [8390]` → container `8080`):** Opened directly on your LAN and Tailnet so bots can reach `/mcp`, `/register`, and `/events` using Bearer tokens without hitting MODC's browser login gate.
-- **Persistent storage:** Stored under `${APP_DATA_DIR}/data` (backed up automatically with MODC). Container runs rootless as `user: "1000:1000"` (`node`).
+- **Addresses returned to bots:** `PUBLIC_URL` is `http://${SERVER_IP:-localhost}:8390`. My Own Data Center sets `SERVER_IP` to the host's first non-bridge IPv4 address. It skips docker, podman, cni, veth, and br- interfaces, and addresses in `10.88.`, `10.89.`, and `172.17.`. It does not skip Tailscale, and it uses the host's interface order, so a machine with several addresses may advertise a LAN address or a Tailscale address. `POST /register` builds `mcp_url` and `events_url` from that base. The `localhost` fallback applies only when this compose file is started without My Own Data Center's environment. My Own Data Center itself uses `127.0.0.1` when the host has no other IPv4 address.
+- **Persistent storage:** Stored under `${APP_DATA_DIR}/data`, which My Own Data Center backs up with the app. The container runs as `user: "1000:1000"`, the same uid as the image's `node` user. On install, My Own Data Center creates that folder and runs `podman unshare chown -R 1000:1000` on it before the first start, so the container user can create `relay.db` and `.relay.key`. Keep the bind mount. A named volume would sit outside `${APP_DATA_DIR}` and would not be part of that backup. If you run this compose file yourself, create the data directory first. With rootless Podman, `podman unshare chown -R 1000:1000` that directory. With rootful Docker, `sudo chown -R 1000:1000` it.
 - **Encrypted secrets:** Wired to `${APP_SEED}` so DB-stored webhook secrets are AES-256-GCM encrypted at rest.
+- **Hardening:** The compose file sets `read_only`, a `/tmp` tmpfs, `cap_drop: [ALL]`, `no-new-privileges`, and the same healthcheck as the root file (`node scripts/healthcheck.mjs`, which checks `PORT` and `ADMIN_PORT`). My Own Data Center's store check treats `no-new-privileges` as tighter confinement, not as extra access, and it passes the other settings through.
 
-### Testing or submitting to MODC App Store
+### Testing or submitting to the community store
 
-1. Publish a tagged release (`git tag v2.0.0 && git push origin v2.0.0`) so `.github/workflows/release.yml` pushes the multi-arch image `ghcr.io/fearjet44/bot-relay-mcp:2.0.0`.
-2. Ensure the `bot-relay-mcp` package on GitHub Packages (`ghcr.io/fearjet44/bot-relay-mcp`) has **Public** visibility.
-3. Submit `modc/bot-relay-mcp/omarchy-app.yml` and `modc/bot-relay-mcp/docker-compose.yml` to [Modc-app-store](https://github.com/TouchWorkStation/Modc-app-store), or push the contents of `modc/` to a standalone store repository and add it in MODC under **App Store → Stores → Add by link**.
+The catalog My Own Data Center ships with is [MyOwnDataCenter/app-store](https://github.com/MyOwnDataCenter/app-store). New apps are submitted to the community store, [MyOwnDataCenter/Modc-app-store](https://github.com/MyOwnDataCenter/Modc-app-store). `https://github.com/TouchWorkStation/Modc-app-store` redirects there. Do not open a submission against the built-in catalog.
+
+Submit only after the `v2.0.0` tag is on GitHub and the GHCR package is public. The listing pins both of these, and neither exists before that:
+
+- image `ghcr.io/fearjet44/bot-relay-mcp:2.0.0`
+- icon `https://raw.githubusercontent.com/fearjet44/bot-relay-mcp/v2.0.0/docs/icon.svg`
+
+1. Merge the release branch, then publish the tag (`git tag v2.0.0 && git push origin v2.0.0`) so `.github/workflows/release.yml` pushes the multi-arch image.
+2. Set the `bot-relay-mcp` package on GitHub Packages (`ghcr.io/fearjet44/bot-relay-mcp`) to **Public**.
+3. Submit `modc/bot-relay-mcp/omarchy-app.yml` and `modc/bot-relay-mcp/docker-compose.yml` to [Modc-app-store](https://github.com/MyOwnDataCenter/Modc-app-store), or push the contents of `modc/` to a standalone store repository and add it in MODC under **App Store → Stores → Add by link**.
 
 ---
 
@@ -32,7 +42,7 @@ No `.env` file or third-party account is required:
 ```bash
 git clone https://github.com/fearjet44/bot-relay-mcp.git
 cd bot-relay-mcp
-docker compose up -d            # or: podman compose up -d
+docker compose up -d --build   # or: podman compose up -d --build
 docker compose logs relay       # copy the one-time First-run Admin Password
 ```
 
@@ -53,7 +63,9 @@ docker compose exec relay node --disable-warning=ExperimentalWarning \
   scripts/create-invite.mjs --bot mac-mini --ttl 1h --uses 1
 ```
 
-Or seed an initial code via `BOOTSTRAP_INVITE_CODE` in `.env`.
+`--ttl` defaults to `1h`. A duration is `<n>s`, `<n>m`, `<n>h`, or `<n>d`, from 60 seconds through 365 days (`90s`, `15m`, `1h`, `24h`, `7d`), or `never`. `--ttl 30s` and `--ttl 400d` exit 1 with that rule on stderr and do not write a code. `create-invite --help` prints the same window.
+
+Or set `BOOTSTRAP_INVITE_CODE` in `.env`. On startup the relay inserts that code once, if it is not already in the database. The seeded row allows 50 registrations, does not expire, and is not locked to a bot id. A restart does not reset the use count. Revoke it in the Admin UI after onboarding. Anyone who can read the env value can register bots with it.
 
 ### Operations
 
@@ -73,10 +85,10 @@ Backups contain message bodies (and encrypted webhook secrets, whose key lives s
 
 ```bash
 git pull
-docker compose pull   # or: docker compose build
-docker compose down
-docker compose up -d
+docker compose up -d --build
 ```
+
+`pull_policy: build` in the root compose file makes a plain `up` rebuild from this checkout on Compose implementations that honor it. `--build` is the command that also works when an implementation ignores `pull_policy`. `docker compose pull` fetches `ghcr.io/fearjet44/bot-relay-mcp:latest`, which is not published until the first release, and the next `up` still rebuilds while `pull_policy` is `build`.
 
 Never run `docker compose down -v`, which deletes the `relay-data` volume. SQLite migrations run
 automatically on startup.
@@ -102,7 +114,7 @@ optionally expose the Bot API (`http://relay:8080`) via Cloudflare Tunnel + Clou
    `cloudflare` profile:
 
 ```bash
-docker compose --profile cloudflare up -d
+docker compose --profile cloudflare up -d --build
 ```
 
 To bind the local host ports to loopback only when using Cloudflare exclusively, override

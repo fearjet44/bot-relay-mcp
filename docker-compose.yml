@@ -1,12 +1,16 @@
-# Works out of the box with standard Docker (`docker compose up -d`) and rootless Podman
-# (`podman compose up -d`) — no .env file or Cloudflare Tunnel required.
+# From a git checkout, build locally. Compose otherwise pulls :latest before it builds,
+# and ghcr.io/fearjet44/bot-relay-mcp:latest does not exist until the first release.
+#   docker compose up -d --build
+#   podman compose up -d --build
+# pull_policy: build makes a plain `up` build too, on implementations that honor it.
+# No .env file or Cloudflare Tunnel is required.
 #
 # Ports:
 #   - 8390 -> Bot API (/mcp, /register, /events, /me, /healthz)
 #   - 8391 -> Web Admin Dashboard (manage bots, invite codes, webhooks, logs)
 #
 # Optional Cloudflare Tunnel sidecar:
-#   docker compose --profile cloudflare up -d
+#   docker compose --profile cloudflare up -d --build
 name: bot-relay
 
 services:
@@ -14,6 +18,8 @@ services:
     build:
       context: .
     image: ${RELAY_IMAGE:-ghcr.io/fearjet44/bot-relay-mcp:latest}
+    # :latest is always pulled when pull_policy is omitted, even if `build` is set.
+    pull_policy: build
     user: "1000:1000"
     restart: unless-stopped
     environment:

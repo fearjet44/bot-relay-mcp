@@ -2,7 +2,8 @@ manifestVersion: 1
 id: bot-relay-mcp
 name: "Bot Relay"
 tagline: "Private MCP message relay and push hub for AI bots"
-icon: https://raw.githubusercontent.com/fearjet44/bot-relay-mcp/main/docs/icon.svg
+# Pinned to the release tag. raw.githubusercontent.com 404s until `v2.0.0` is pushed.
+icon: https://raw.githubusercontent.com/fearjet44/bot-relay-mcp/v2.0.0/docs/icon.svg
 category: ai
 version: "2.0.0"
 port: 8391

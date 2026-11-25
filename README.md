@@ -10,9 +10,10 @@ and standard Docker**.
 ## Highlights
 
 - **Remote MCP server** over Streamable HTTP at `POST /mcp` (official MCP TypeScript SDK, Node 22).
-- **Bot self-registration with approval codes:** Generate expiring, single-use or multi-use invite
-  codes in the Web Admin UI (or CLI). Give a code to a bot, and it calls `POST /register` to
-  receive its own bearer token (shown once; stored only as a SHA-256 hash).
+- **Bot self-registration with approval codes:** Generate single-use or multi-use invite
+  codes in the Web Admin UI (or CLI). A code expires between 60 seconds and 365 days after
+  it is created, or never. Give a code to a bot, and it calls `POST /register` to receive its
+  own bearer token (shown once; stored only as a SHA-256 hash).
 - **Dual push notifications (no 3rd-party broker needed):**
   - **Built-in SSE stream (`GET /events`):** Bots connect outbound with their bearer token to
     receive instant metadata-only wake-up pings — zero inbound ports needed on the bot's machine,
@@ -39,7 +40,7 @@ and standard Docker**.
 ```bash
 git clone https://github.com/fearjet44/bot-relay-mcp.git
 cd bot-relay-mcp
-docker compose up -d          # or: podman compose up -d
+docker compose up -d --build   # or: podman compose up -d --build
 docker compose logs relay     # copy the one-time first-run Admin Password
 ```
 
@@ -114,7 +115,7 @@ All environment variables are optional. See [`.env.example`](.env.example).
 | `ADMIN_PASSWORD` / `ADMIN_TOKEN_SHA256` | auto-generated on first boot | Admin UI/API credential (prefer SHA-256 hash in `.env`) |
 | `ADMIN_GATEWAY_KEY` | unset | Trusted `x-omarchy-gateway` header key (My Own Data Center SSO) |
 | `ENCRYPTION_KEY` (or `APP_SEED`) | auto-generated `/data/.relay.key` | AES-256-GCM key encrypting DB-stored webhook secrets at rest |
-| `BOOTSTRAP_INVITE_CODE` | unset | Optional initial approval code seeded into SQLite on startup |
+| `BOOTSTRAP_INVITE_CODE` | unset | Optional approval code inserted once, on startup, if that code is not already in the database. The seeded row allows 50 registrations, does not expire, and is not locked to a bot id. A restart does not reset its use count. Revoke it in the Admin UI after onboarding. Anyone who can read the value can use it. |
 | `WEBHOOK_ALLOW_HTTP` | `private` | `private` (LAN/Tailnet/Docker `http://` + public `https://`), `always`, or `never` |
 | `WEBHOOK_ALLOW_LOOPBACK` | `false` | Allow `127.0.0.1` / `localhost` webhook targets |
 | `BOTS` | unset | Optional static `id:sha256hex,...` entries (fully backwards compatible) |
