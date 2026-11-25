@@ -29,8 +29,12 @@ function main(): void {
     envNotify: config.notify,
   });
 
-  if (config.bootstrapInviteCode) {
-    store.ensureBootstrapInviteCode(config.bootstrapInviteCode);
+  if (config.bootstrapInvite) {
+    store.ensureBootstrapInviteCode(config.bootstrapInvite.code, {
+      maxUses: config.bootstrapInvite.maxUses,
+      expiresInSeconds: config.bootstrapInvite.expiresInSeconds,
+      botId: config.bootstrapInvite.botId,
+    });
   }
 
   // Zero-config first-run admin password when no admin/gateway/viewer auth is configured via env.

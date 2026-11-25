@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { ConfigError, loadConfig } from "../src/config.ts";
 import { connectClient, payload, startServer, type ServerHarness } from "./helpers.ts";
 
 describe("bot self-registration and self-service endpoints", () => {
@@ -228,5 +229,52 @@ describe("bot self-registration and self-service endpoints", () => {
     });
     assert.equal(res.status, 201);
     assert.equal(((await res.json()) as { bot_id: string }).bot_id, "cli-bot");
+  });
+
+  it("parses and validates BOOTSTRAP_INVITE_* config options", () => {
+    const defaults = loadConfig({ BOOTSTRAP_INVITE_CODE: "join_defaults" });
+    assert.deepEqual(defaults.bootstrapInvite, {
+      code: "join_defaults",
+      maxUses: 1,
+      expiresInSeconds: 86400,
+      botId: null,
+    });
+
+    const custom = loadConfig({
+      BOOTSTRAP_INVITE_CODE: "join_custom",
+      BOOTSTRAP_INVITE_USES: "5",
+      BOOTSTRAP_INVITE_TTL: "90s",
+      BOOTSTRAP_INVITE_BOT: "worker-1",
+    });
+    assert.deepEqual(custom.bootstrapInvite, {
+      code: "join_custom",
+      maxUses: 5,
+      expiresInSeconds: 90,
+      botId: "worker-1",
+    });
+
+    const never = loadConfig({
+      BOOTSTRAP_INVITE_CODE: "join_never",
+      BOOTSTRAP_INVITE_TTL: "never",
+    });
+    assert.equal(never.bootstrapInvite?.expiresInSeconds, null);
+
+    // Bounds 60s and 365d succeed; out-of-range values fail fast with ConfigError.
+    assert.equal(loadConfig({ BOOTSTRAP_INVITE_CODE: "join_min", BOOTSTRAP_INVITE_TTL: "60s" }).bootstrapInvite?.expiresInSeconds, 60);
+    assert.equal(
+      loadConfig({ BOOTSTRAP_INVITE_CODE: "join_max", BOOTSTRAP_INVITE_TTL: "365d" }).bootstrapInvite?.expiresInSeconds,
+      365 * 86400,
+    );
+
+    for (const badEnv of [
+      { BOOTSTRAP_INVITE_USES: "0" },
+      { BOOTSTRAP_INVITE_USES: "101" },
+      { BOOTSTRAP_INVITE_TTL: "59s" },
+      { BOOTSTRAP_INVITE_TTL: "366d" },
+      { BOOTSTRAP_INVITE_TTL: "soon" },
+      { BOOTSTRAP_INVITE_BOT: "Bad_Id" },
+    ]) {
+      assert.throws(() => loadConfig(badEnv), ConfigError, JSON.stringify(badEnv));
+    }
   });
 });

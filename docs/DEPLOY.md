@@ -65,7 +65,7 @@ docker compose exec relay node --disable-warning=ExperimentalWarning \
 
 `--ttl` defaults to `1h`. A duration is `<n>s`, `<n>m`, `<n>h`, or `<n>d`, from 60 seconds through 365 days (`90s`, `15m`, `1h`, `24h`, `7d`), or `never`. `--ttl 30s` and `--ttl 400d` exit 1 with that rule on stderr and do not write a code. `create-invite --help` prints the same window.
 
-Or set `BOOTSTRAP_INVITE_CODE` in `.env`. On startup the relay inserts that code once, if it is not already in the database. The seeded row allows 50 registrations, does not expire, and is not locked to a bot id. A restart does not reset the use count. Revoke it in the Admin UI after onboarding. Anyone who can read the env value can register bots with it.
+Or set `BOOTSTRAP_INVITE_CODE` in `.env`. On startup the relay inserts that code once, if it is not already in the database. By default the seeded row allows **1** registration, expires after **24h**, and is not locked to a `bot_id`. Override with `BOOTSTRAP_INVITE_USES` (`1`–`100`), `BOOTSTRAP_INVITE_TTL` (`60s`–`365d` as `<n>s`/`<n>m`/`<n>h`/`<n>d`, or `never`), and `BOOTSTRAP_INVITE_BOT` (optional locked `bot_id`). A restart does not reset its use count or extend its expiry. Anyone who can read the env value can use the code while it is active.
 
 ### Operations
 

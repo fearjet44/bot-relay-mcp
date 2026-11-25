@@ -18,6 +18,13 @@ export interface NotifyTarget {
   key: string | null;
 }
 
+export interface BootstrapInviteConfig {
+  code: string;
+  maxUses: number;
+  expiresInSeconds: number | null;
+  botId: string | null;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -34,6 +41,7 @@ export interface Config {
   adminGatewayKey: string | undefined;
   encryptionKey: string | undefined;
   bootstrapInviteCode: string | undefined;
+  bootstrapInvite: BootstrapInviteConfig | undefined;
   webhookPolicy: WebhookPolicy;
   maxBodyBytes: number;
   maxSubjectChars: number;
@@ -186,6 +194,34 @@ function parsePublicUrl(raw: string | undefined, hostname: string | undefined): 
   return trimmed.replace(/\/+$/, "");
 }
 
+const MIN_INVITE_TTL_SECONDS = 60;
+const MAX_INVITE_TTL_SECONDS = 365 * 86400;
+const DEFAULT_BOOTSTRAP_INVITE_TTL_SECONDS = 24 * 3600;
+
+export function parseInviteTtlSeconds(
+  raw: string | undefined,
+  fallbackSeconds: number | null,
+  label: string,
+): number | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallbackSeconds;
+  if (trimmed.toLowerCase() === "never") return null;
+  const match = trimmed.match(/^(\d+)([smhd])$/i);
+  if (!match) {
+    throw new ConfigError(
+      `${label} must be a duration (<n>s, <n>m, <n>h, or <n>d) between 60 seconds and 365 days, or "never"`,
+    );
+  }
+  const n = Number(match[1]);
+  const unit = match[2]!.toLowerCase() as "s" | "m" | "h" | "d";
+  const mult = { s: 1, m: 60, h: 3600, d: 86400 }[unit];
+  const seconds = n * mult;
+  if (!Number.isSafeInteger(seconds) || seconds < MIN_INVITE_TTL_SECONDS || seconds > MAX_INVITE_TTL_SECONDS) {
+    throw new ConfigError(`${label} must be between 60 seconds and 365 days, or "never"`);
+  }
+  return seconds;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const host = env.HOST?.trim() || "0.0.0.0";
   const port = intFromEnv(env, "PORT", 8080, 1, 65535);
@@ -213,6 +249,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const publicHostname = env.PUBLIC_HOSTNAME?.trim() || undefined;
   const publicUrl = parsePublicUrl(env.PUBLIC_URL, publicHostname);
 
+  const bootstrapInviteCode = env.BOOTSTRAP_INVITE_CODE?.trim() || undefined;
+  const bootstrapInviteUses = intFromEnv(env, "BOOTSTRAP_INVITE_USES", 1, 1, 100);
+  const bootstrapInviteTtl = parseInviteTtlSeconds(
+    env.BOOTSTRAP_INVITE_TTL,
+    DEFAULT_BOOTSTRAP_INVITE_TTL_SECONDS,
+    "BOOTSTRAP_INVITE_TTL",
+  );
+  const bootstrapInviteBotRaw = env.BOOTSTRAP_INVITE_BOT?.trim() || null;
+  if (bootstrapInviteBotRaw !== null && !BOT_ID_PATTERN.test(bootstrapInviteBotRaw)) {
+    throw new ConfigError(`BOOTSTRAP_INVITE_BOT "${bootstrapInviteBotRaw}" must match ${BOT_ID_PATTERN}`);
+  }
+  const bootstrapInvite: BootstrapInviteConfig | undefined = bootstrapInviteCode
+    ? {
+        code: bootstrapInviteCode,
+        maxUses: bootstrapInviteUses,
+        expiresInSeconds: bootstrapInviteTtl,
+        botId: bootstrapInviteBotRaw,
+      }
+    : undefined;
+
   return {
     host,
     port,
@@ -227,7 +283,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminTokenHash,
     adminGatewayKey: env.ADMIN_GATEWAY_KEY?.trim() || undefined,
     encryptionKey: env.ENCRYPTION_KEY?.trim() || env.APP_SEED?.trim() || undefined,
-    bootstrapInviteCode: env.BOOTSTRAP_INVITE_CODE?.trim() || undefined,
+    bootstrapInviteCode,
+    bootstrapInvite,
     webhookPolicy,
     maxBodyBytes: intFromEnv(env, "MAX_BODY_BYTES", 32 * 1024, 1, 1024 * 1024),
     maxSubjectChars: intFromEnv(env, "MAX_SUBJECT_CHARS", 200, 1, 2000),

@@ -806,6 +806,7 @@ describe("docs contract: zero-config boot (src/index.ts)", () => {
     const first = await boot(env);
     let password: string | undefined;
     let regToken: string;
+    let initialExpiresAt: string | null = null;
     try {
       assert.equal((await fetch(`${admin}/healthz`)).status, 200);
       assert.equal((await fetch(`${bot}/api/admin/overview`)).status, 404);
@@ -826,10 +827,22 @@ describe("docs contract: zero-config boot (src/index.ts)", () => {
       const reg = await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "boot-bot" });
       assert.equal(reg.status, 201);
       regToken = ((await reg.json()) as { token: string }).token;
-      // Current seed: 50 uses, no expiry, any bot id. A second bot is accepted.
-      assert.equal((await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "boot-bot-2" })).status, 201);
+      // Default bootstrap invite: 1 use, 24h expiry, any bot_id. A second registration is rejected.
+      assert.equal((await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "boot-bot-2" })).status, 403);
     } finally {
       await first.stop();
+    }
+
+    {
+      const dbBefore = new DatabaseSync(env.DB_PATH);
+      try {
+        const row = dbBefore
+          .prepare("SELECT expires_at FROM invite_codes WHERE label = 'bootstrap (env)'")
+          .get() as { expires_at: string | null } | undefined;
+        initialExpiresAt = row?.expires_at ?? null;
+      } finally {
+        dbBefore.close();
+      }
     }
 
     const second = await boot(env);
@@ -847,17 +860,59 @@ describe("docs contract: zero-config boot (src/index.ts)", () => {
     } finally {
       await second.stop();
     }
-    // Restart must not re-seed / reset the bootstrap invite's usage counter.
+    // Restart must not re-seed, reset the use counter, or extend the expiry.
     const db = new DatabaseSync(env.DB_PATH);
     try {
       const rows = db.prepare(
         "SELECT max_uses, expires_at, bot_id, uses FROM invite_codes WHERE label = 'bootstrap (env)'",
       ).all() as { max_uses: number; expires_at: string | null; bot_id: string | null; uses: number }[];
       assert.equal(rows.length, 1, "bootstrap invite must be seeded exactly once");
-      assert.equal(rows[0]!.max_uses, 50);
-      assert.equal(rows[0]!.expires_at, null);
+      assert.equal(rows[0]!.max_uses, 1);
+      assert.ok(rows[0]!.expires_at !== null, "default bootstrap invite must expire after 24h");
+      assert.equal(rows[0]!.expires_at, initialExpiresAt, "restart must not extend bootstrap invite expiry");
+      const deltaMs = Date.parse(rows[0]!.expires_at) - Date.now();
+      assert.ok(deltaMs > 23 * 3600 * 1000 && deltaMs <= 24 * 3600 * 1000 + 60_000, `expected ~24h TTL, got ${deltaMs}ms`);
       assert.equal(rows[0]!.bot_id, null);
-      assert.equal(rows[0]!.uses, 2);
+      assert.equal(rows[0]!.uses, 1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("honours BOOTSTRAP_INVITE_USES, BOOTSTRAP_INVITE_TTL, and BOOTSTRAP_INVITE_BOT overrides", async () => {
+    const PORT = String(await freePort());
+    const sub = mkdtempSync(join(dir, "boot-opts-"));
+    const dbPath = join(sub, "relay.db");
+    const env = {
+      PORT,
+      DB_PATH: dbPath,
+      ADMIN_PASSWORD: "opts-admin-password",
+      BOOTSTRAP_INVITE_CODE: "join_boot_opts_code_1234567890",
+      BOOTSTRAP_INVITE_USES: "2",
+      BOOTSTRAP_INVITE_TTL: "never",
+      BOOTSTRAP_INVITE_BOT: "locked-boot-bot",
+    };
+    const bot = `http://127.0.0.1:${PORT}`;
+    const relay = await boot(env);
+    try {
+      // Mismatched bot_id is rejected without consuming a use.
+      assert.equal((await register(bot, { code: env.BOOTSTRAP_INVITE_CODE, bot_id: "wrong-bot" })).status, 400);
+      // Matching (or omitted) bot_id succeeds.
+      const ok = await register(bot, { code: env.BOOTSTRAP_INVITE_CODE });
+      assert.equal(ok.status, 201);
+      assert.equal(((await ok.json()) as { bot_id: string }).bot_id, "locked-boot-bot");
+    } finally {
+      await relay.stop();
+    }
+    const db = new DatabaseSync(dbPath);
+    try {
+      const row = db
+        .prepare("SELECT max_uses, expires_at, bot_id, uses FROM invite_codes WHERE label = 'bootstrap (env)'")
+        .get() as { max_uses: number; expires_at: string | null; bot_id: string | null; uses: number };
+      assert.equal(row.max_uses, 2);
+      assert.equal(row.expires_at, null);
+      assert.equal(row.bot_id, "locked-boot-bot");
+      assert.equal(row.uses, 1);
     } finally {
       db.close();
     }

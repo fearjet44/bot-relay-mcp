@@ -115,7 +115,8 @@ All environment variables are optional. See [`.env.example`](.env.example).
 | `ADMIN_PASSWORD` / `ADMIN_TOKEN_SHA256` | auto-generated on first boot | Admin UI/API credential (prefer SHA-256 hash in `.env`) |
 | `ADMIN_GATEWAY_KEY` | unset | Trusted `x-omarchy-gateway` header key (My Own Data Center SSO) |
 | `ENCRYPTION_KEY` (or `APP_SEED`) | auto-generated `/data/.relay.key` | AES-256-GCM key encrypting DB-stored webhook secrets at rest |
-| `BOOTSTRAP_INVITE_CODE` | unset | Optional approval code inserted once, on startup, if that code is not already in the database. The seeded row allows 50 registrations, does not expire, and is not locked to a bot id. A restart does not reset its use count. Revoke it in the Admin UI after onboarding. Anyone who can read the value can use it. |
+| `BOOTSTRAP_INVITE_CODE` | unset | Optional approval code inserted once on startup if not already in SQLite. Defaults to `1` use, `24h` expiry, and any `bot_id`. A restart does not reset its use count or expiry. Anyone who can read the value can use it. |
+| `BOOTSTRAP_INVITE_USES` / `BOOTSTRAP_INVITE_TTL` / `BOOTSTRAP_INVITE_BOT` | `1` / `24h` / unset | Optional overrides for `BOOTSTRAP_INVITE_CODE`: uses (`1`–`100`), expiry (`60s`–`365d` as `<n>s\|m\|h\|d`, or `never`), and an optional locked `bot_id`. |
 | `WEBHOOK_ALLOW_HTTP` | `private` | `private` (LAN/Tailnet/Docker `http://` + public `https://`), `always`, or `never` |
 | `WEBHOOK_ALLOW_LOOPBACK` | `false` | Allow `127.0.0.1` / `localhost` webhook targets |
 | `BOTS` | unset | Optional static `id:sha256hex,...` entries (fully backwards compatible) |

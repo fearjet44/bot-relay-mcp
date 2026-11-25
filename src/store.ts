@@ -750,9 +750,32 @@ export class RelayStore {
     };
   }
 
-  ensureBootstrapInviteCode(rawCode: string): void {
+  ensureBootstrapInviteCode(
+    rawCode: string,
+    opts: {
+      maxUses?: number | undefined;
+      expiresInSeconds?: number | null | undefined;
+      botId?: string | null | undefined;
+    } = {},
+  ): void {
     const trimmed = rawCode.trim();
     if (!trimmed) return;
+    const maxUses = opts.maxUses === undefined ? 1 : Math.floor(opts.maxUses);
+    if (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 100) {
+      throw new RelayError("invalid_max_uses", "max_uses must be an integer between 1 and 100");
+    }
+    const botId = opts.botId?.trim() || null;
+    if (botId !== null && !BOT_ID_RE.test(botId)) {
+      throw new RelayError("invalid_bot_id", "bot_id must be lowercase letters, digits and dashes (max 63 chars)");
+    }
+    let expiresAt: string | null = null;
+    if (opts.expiresInSeconds !== null) {
+      const ttl = opts.expiresInSeconds === undefined ? 86400 : Math.floor(opts.expiresInSeconds);
+      if (!Number.isInteger(ttl) || ttl < 60 || ttl > 365 * 86400) {
+        throw new RelayError("invalid_ttl", "expires_in_seconds must be between 60 seconds and 365 days");
+      }
+      expiresAt = new Date(this.now().getTime() + ttl * 1000).toISOString();
+    }
     const hash = sha256(trimmed).toString("hex");
     const existing = this.db.prepare("SELECT id FROM invite_codes WHERE code_hash = ?").get(hash);
     if (existing) return;
@@ -760,9 +783,9 @@ export class RelayStore {
     this.db
       .prepare(
         `INSERT INTO invite_codes (id, code_hash, code_prefix, bot_id, label, max_uses, uses, expires_at, created_at)
-         VALUES (?, ?, ?, NULL, 'bootstrap (env)', 50, 0, NULL, ?)`,
+         VALUES (?, ?, ?, ?, 'bootstrap (env)', ?, 0, ?, ?)`,
       )
-      .run(`inv_${randomUUID()}`, hash, `${trimmed.slice(0, 6)}…`, now);
+      .run(`inv_${randomUUID()}`, hash, `${trimmed.slice(0, 6)}…`, botId, maxUses, expiresAt, now);
   }
 
   listInviteCodes(): InviteSummary[] {
